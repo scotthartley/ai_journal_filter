@@ -13,16 +13,26 @@ research_interests: |
 database:
   path: "journal_filter.db"
 
+# Provider to use for filtering: "anthropic" or "gemini"
+provider: "anthropic"
+
+# Anthropic (Claude) — requires ANTHROPIC_API_KEY environment variable
 anthropic:
   model: "claude-opus-4-6"
   batch_size: 20
   max_tokens: 2048
 
+# Google Gemini — requires GEMINI_API_KEY environment variable
+# gemini:
+#   model: "gemini-2.5-flash"
+#   batch_size: 20
+#   max_tokens: 4096
+
 output:
   rss_path: "filtered_feed.xml"
   feed_title: "My Filtered Research Feed"
   feed_link: "https://example.com/filtered_feed.xml"
-  feed_description: "Articles curated by Claude matching my research interests"
+  feed_description: "Articles curated by AI matching my research interests"
   max_articles: 100
   max_age_days: 30
 

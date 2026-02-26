@@ -24,6 +24,14 @@ from email.utils import parsedate_to_datetime
 from logging.handlers import RotatingFileHandler
 
 import anthropic
+try:
+    from google import genai
+    from google.genai import types as _genai_types
+    from google.genai import errors as _genai_errors
+except ImportError:
+    genai = None
+    _genai_types = None
+    _genai_errors = None
 import feedparser
 import yaml
 from feedgen.feed import FeedGenerator
@@ -315,6 +323,16 @@ def call_claude(
     return response.content[0].text
 
 
+def call_gemini(client, model: str, prompt: str, max_tokens: int) -> str:
+    """Call the Gemini API and return the raw text response."""
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=_genai_types.GenerateContentConfig(max_output_tokens=max_tokens),
+    )
+    return response.text
+
+
 def parse_claude_response(response_text: str) -> list[dict]:
     """
     Parse Claude's JSON array response.
@@ -346,17 +364,18 @@ def parse_claude_response(response_text: str) -> list[dict]:
     )
 
 
-def filter_batch_with_claude(
-    client: anthropic.Anthropic,
+def filter_batch(
+    client,
     batch: list[dict],
     research_interests: str,
     model: str,
     max_tokens: int,
+    provider: str,
     max_retries: int = 2,
 ) -> list[dict]:
     """
-    Filter a single batch of articles with Claude.
-    Handles RateLimitError (60s wait), 529 overloaded (30s wait),
+    Filter a single batch of articles with the configured LLM provider.
+    Handles rate limits (60s wait), overload/503 (30s wait),
     and ValueError from parse (log warning, return []).
     Returns list of dicts with keys: index, rationale.
     """
@@ -365,7 +384,10 @@ def filter_batch_with_claude(
 
     for attempt in range(max_retries + 1):
         try:
-            raw = call_claude(client, model, prompt, max_tokens)
+            if provider == "gemini":
+                raw = call_gemini(client, model, prompt, max_tokens)
+            else:
+                raw = call_claude(client, model, prompt, max_tokens)
             return parse_claude_response(raw)
         except anthropic.RateLimitError:
             wait = 60
@@ -395,35 +417,69 @@ def filter_batch_with_claude(
                     logger.warning("Exhausted retries on overload; skipping batch.")
                     return []
             else:
-                logger.error("Claude API error (status %d): %s", exc.status_code, exc)
+                logger.error("Anthropic API error (status %d): %s", exc.status_code, exc)
                 return []
         except ValueError as exc:
-            logger.warning("Could not parse Claude response for batch: %s", exc)
+            logger.warning("Could not parse LLM response for batch: %s", exc)
+            return []
+        except Exception as exc:
+            if _genai_errors is not None:
+                if isinstance(exc, _genai_errors.ClientError) and getattr(exc, "code", None) == 429:
+                    wait = 60
+                    logger.warning(
+                        "Gemini rate limit hit (attempt %d/%d). Waiting %ds...",
+                        attempt + 1,
+                        max_retries + 1,
+                        wait,
+                    )
+                    if attempt < max_retries:
+                        time.sleep(wait)
+                        continue
+                    else:
+                        logger.warning("Exhausted retries on rate limit; skipping batch.")
+                        return []
+                if isinstance(exc, _genai_errors.ServerError) and getattr(exc, "code", None) == 503:
+                    wait = 30
+                    logger.warning(
+                        "Gemini API overloaded (attempt %d/%d). Waiting %ds...",
+                        attempt + 1,
+                        max_retries + 1,
+                        wait,
+                    )
+                    if attempt < max_retries:
+                        time.sleep(wait)
+                        continue
+                    else:
+                        logger.warning("Exhausted retries on overload; skipping batch.")
+                        return []
+            logger.error("Unexpected API error: %s", exc)
             return []
 
     return []
 
 
 def filter_new_articles(
-    client: anthropic.Anthropic,
+    client,
     articles: list[dict],
     conn: sqlite3.Connection,
     config: dict,
+    provider: str = "anthropic",
 ) -> list[dict]:
     """
     Full pipeline:
     1. Filter out already-seen articles.
     2. Mark all new articles as seen (mark-before-filter pattern).
-    3. Batch and call Claude.
+    3. Batch and call the configured LLM provider.
     4. Save matched articles to DB.
     Returns list of matched article dicts (with rationale).
     """
     logger = logging.getLogger(__name__)
     research_interests = config["research_interests"]
-    anthropic_cfg = config.get("anthropic", {})
-    model = anthropic_cfg.get("model", "claude-opus-4-6")
-    batch_size = int(anthropic_cfg.get("batch_size", 20))
-    max_tokens = int(anthropic_cfg.get("max_tokens", 2048))
+    llm_cfg = config.get(provider, {})
+    default_model = "gemini-2.5-flash" if provider == "gemini" else "claude-opus-4-6"
+    model = llm_cfg.get("model", default_model)
+    batch_size = int(llm_cfg.get("batch_size", 20))
+    max_tokens = int(llm_cfg.get("max_tokens", 2048))
 
     # Deduplicate against DB
     new_articles = [a for a in articles if not is_seen(conn, a["url"])]
@@ -445,19 +501,20 @@ def filter_new_articles(
     for batch_start in range(0, len(new_articles), batch_size):
         batch = new_articles[batch_start : batch_start + batch_size]
         logger.info(
-            "Sending batch %d-%d to Claude...",
+            "Sending batch %d-%d to %s...",
             batch_start,
             batch_start + len(batch) - 1,
+            provider,
         )
-        results = filter_batch_with_claude(
-            client, batch, research_interests, model, max_tokens
+        results = filter_batch(
+            client, batch, research_interests, model, max_tokens, provider
         )
 
         for result in results:
             idx = result.get("index")
             rationale = result.get("rationale", "")
             if idx is None or not isinstance(idx, int) or idx >= len(batch):
-                logger.warning("Invalid index %r in Claude response; skipping.", idx)
+                logger.warning("Invalid index %r in LLM response; skipping.", idx)
                 continue
 
             article = batch[idx]
@@ -474,7 +531,7 @@ def filter_new_articles(
             matched.append({**article, "rationale": rationale})
             logger.info("Matched: %s", article["title"][:80])
 
-    logger.info("Claude matched %d new articles.", len(matched))
+    logger.info("%s matched %d new articles.", provider.capitalize(), len(matched))
     return matched
 
 
@@ -591,13 +648,27 @@ def main() -> None:
     logger = logging.getLogger(__name__)
     logger.info("Starting claude_journal_filter (config: %s)", config_path)
 
-    # Validate API key
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        logger.error(
-            "ANTHROPIC_API_KEY environment variable is not set. Exiting."
-        )
-        sys.exit(1)
+    provider = config.get("provider", "anthropic")
+    logger.info("Using LLM provider: %s", provider)
+
+    if provider == "gemini":
+        if genai is None:
+            logger.error(
+                "google-generativeai package not installed. "
+                "Run: pip install google-generativeai"
+            )
+            sys.exit(1)
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            logger.error("GEMINI_API_KEY environment variable is not set. Exiting.")
+            sys.exit(1)
+    else:
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            logger.error(
+                "ANTHROPIC_API_KEY environment variable is not set. Exiting."
+            )
+            sys.exit(1)
 
     try:
         # Resolve DB path
@@ -608,15 +679,18 @@ def main() -> None:
         conn = init_db(db_path)
         logger.info("Database initialized: %s", db_path)
 
-        client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+        if provider == "gemini":
+            client = genai.Client(api_key=api_key)
+        else:
+            client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
 
         # Fetch
         feeds_config = config.get("feeds", [])
         articles = fetch_all_feeds(feeds_config)
         logger.info("Total articles fetched across all feeds: %d", len(articles))
 
-        # Filter (dedup → mark seen → batch → Claude → save matches)
-        filter_new_articles(client, articles, conn, config)
+        # Filter (dedup → mark seen → batch → LLM → save matches)
+        filter_new_articles(client, articles, conn, config, provider)
 
         # Generate output RSS from full DB history
         output_config = config.get("output", {})
