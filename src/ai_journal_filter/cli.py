@@ -1,14 +1,10 @@
-#!/usr/bin/env python3
 """
-ai_journal_filter.py
-
 Fetches scientific journal RSS feeds, filters articles against research
 interests using a configurable LLM API, deduplicates via SQLite, and publishes a
 filtered RSS feed to a configurable path for static web serving.
 
 Run as a cron job:
-  0 */6 * * * /path/to/venv/bin/python /path/to/ai_journal_filter.py \
-      --config /path/to/config.yaml
+  0 */6 * * * /path/to/venv/bin/ai-journal-filter --config /path/to/config.yaml
 """
 
 import argparse

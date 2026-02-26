@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai-journal-filter"
+version = "0.1.0"
+description = "Filter scientific journal RSS feeds using a configurable LLM API"
+requires-python = ">=3.10"
+dependencies = [
+    "feedparser>=6.0.11",
+    "feedgen>=1.0.0",
+    "PyYAML>=6.0.2",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40.0"]
+gemini = ["google-genai>=1.0.0"]
+
+[project.scripts]
+ai-journal-filter = "ai_journal_filter.cli:main"
+
+[tool.hatchling.build]
+packages = ["src/ai_journal_filter"]

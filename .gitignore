@@ -4,3 +4,5 @@ filtered_feed.xml
 .venv/*
 .claude/*
 __pycache__/*
+*.egg-info/
+dist/
