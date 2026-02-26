@@ -282,6 +282,7 @@ The following is a JSON array of articles, each with an "index" (0-based), "titl
 
 INSTRUCTIONS:
 - Evaluate each article against the researcher's interests.
+- Be conservative: only include an article if you are confident it is relevant. When the abstract is absent, very short, or appears to be metadata rather than a real abstract, apply a higher threshold — do not include the article based on vague or superficial title-keyword overlap alone.
 - Return ONLY a JSON array containing objects for articles that ARE relevant.
 - Each object must have exactly two fields:
     "index": the integer index of the article from the input array
@@ -625,8 +626,7 @@ def generate_output_feed(conn: sqlite3.Connection, output_config: dict, config_d
         pub_dt = _parse_date_to_utc(row["published"])
         fe.pubDate(pub_dt)
 
-    fg.rss_str(pretty=True)
-    fg.rss_file(rss_path)
+    fg.rss_file(rss_path, pretty=True)
     logger.info("Feed written to %s", rss_path)
 
 
