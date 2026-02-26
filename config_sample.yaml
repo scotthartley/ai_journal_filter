@@ -13,17 +13,24 @@ research_interests: |
 database:
   path: "journal_filter.db"
 
-# Provider to use for filtering: "anthropic" or "gemini"
+# Which LLM provider to use for filtering articles.
+# Options:
+#   "anthropic" — Claude models via the Anthropic API (requires ANTHROPIC_API_KEY)
+#   "gemini"    — Gemini models via the Google Generative AI API (requires GEMINI_API_KEY)
 provider: "anthropic"
 
-# Anthropic (Claude) — requires ANTHROPIC_API_KEY environment variable
+# Anthropic (Claude) provider settings.
+# Only used when provider is set to "anthropic".
+# Requires the ANTHROPIC_API_KEY environment variable.
 anthropic:
   model: "claude-opus-4-6"
   batch_size: 20
   max_tokens: 2048
   # rpm_limit: 50  # max requests per minute (0 or omit = no limit)
 
-# Google Gemini — requires GEMINI_API_KEY environment variable
+# Google Gemini provider settings.
+# Only used when provider is set to "gemini".
+# Requires the GEMINI_API_KEY environment variable.
 # gemini:
 #   model: "gemini-2.5-flash"
 #   batch_size: 20
@@ -34,7 +41,7 @@ output:
   rss_path: "filtered_feed.xml"
   feed_title: "My Filtered Research Feed"
   feed_link: "https://example.com/filtered_feed.xml"
-  feed_description: "Articles curated by AI matching my research interests"
+  feed_description: "Articles matching my research interests"
   max_articles: 100
   max_age_days: 30
 
