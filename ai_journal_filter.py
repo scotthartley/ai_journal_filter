@@ -315,9 +315,7 @@ def build_prompt(research_interests: str, batch: list[dict]) -> str:
     )
 
 
-def call_claude(
-    client: anthropic.Anthropic, model: str, prompt: str, max_tokens: int
-) -> str:
+def call_claude(client, model: str, prompt: str, max_tokens: int) -> str:
     """Call the Claude API and return the raw text response."""
     response = client.messages.create(
         model=model,
@@ -368,38 +366,18 @@ def parse_llm_response(response_text: str) -> list[dict]:
     )
 
 
-def filter_batch(
-    client,
-    batch: list[dict],
-    research_interests: str,
-    model: str,
-    max_tokens: int,
-    provider: str,
-    max_retries: int = 2,
+def _filter_batch_anthropic(
+    client, prompt: str, model: str, max_tokens: int, max_retries: int, logger
 ) -> list[dict]:
-    """
-    Filter a single batch of articles with the configured LLM provider.
-    Handles rate limits (60s wait), overload/503 (30s wait),
-    and ValueError from parse (log warning, return []).
-    Returns list of dicts with keys: index, rationale.
-    """
-    logger = logging.getLogger(__name__)
-    prompt = build_prompt(research_interests, batch)
-
+    """Call Claude with retries for rate-limit and overload errors."""
     for attempt in range(max_retries + 1):
         try:
-            if provider == "gemini":
-                raw = call_gemini(client, model, prompt, max_tokens)
-            else:
-                raw = call_claude(client, model, prompt, max_tokens)
-            return parse_llm_response(raw)
+            return parse_llm_response(call_claude(client, model, prompt, max_tokens))
         except anthropic.RateLimitError:
             wait = 60
             logger.warning(
-                "Rate limit hit (attempt %d/%d). Waiting %ds...",
-                attempt + 1,
-                max_retries + 1,
-                wait,
+                "Anthropic rate limit (attempt %d/%d). Waiting %ds...",
+                attempt + 1, max_retries + 1, wait,
             )
             if attempt < max_retries:
                 time.sleep(wait)
@@ -410,10 +388,8 @@ def filter_batch(
             if exc.status_code == 529:
                 wait = 30
                 logger.warning(
-                    "API overloaded (attempt %d/%d). Waiting %ds...",
-                    attempt + 1,
-                    max_retries + 1,
-                    wait,
+                    "Anthropic overloaded (attempt %d/%d). Waiting %ds...",
+                    attempt + 1, max_retries + 1, wait,
                 )
                 if attempt < max_retries:
                     time.sleep(wait)
@@ -426,40 +402,72 @@ def filter_batch(
         except ValueError as exc:
             logger.warning("Could not parse LLM response for batch: %s", exc)
             return []
-        except Exception as exc:
-            if _genai_errors is not None:
-                if isinstance(exc, _genai_errors.ClientError) and getattr(exc, "code", None) == 429:
-                    wait = 60
-                    logger.warning(
-                        "Gemini rate limit hit (attempt %d/%d). Waiting %ds...",
-                        attempt + 1,
-                        max_retries + 1,
-                        wait,
-                    )
-                    if attempt < max_retries:
-                        time.sleep(wait)
-                        continue
-                    else:
-                        logger.warning("Exhausted retries on rate limit; skipping batch.")
-                        return []
-                if isinstance(exc, _genai_errors.ServerError) and getattr(exc, "code", None) == 503:
-                    wait = 30
-                    logger.warning(
-                        "Gemini API overloaded (attempt %d/%d). Waiting %ds...",
-                        attempt + 1,
-                        max_retries + 1,
-                        wait,
-                    )
-                    if attempt < max_retries:
-                        time.sleep(wait)
-                        continue
-                    else:
-                        logger.warning("Exhausted retries on overload; skipping batch.")
-                        return []
-            logger.error("Unexpected API error: %s", exc)
-            return []
-
     return []
+
+
+def _filter_batch_gemini(
+    client, prompt: str, model: str, max_tokens: int, max_retries: int, logger
+) -> list[dict]:
+    """Call Gemini with retries for rate-limit and overload errors."""
+    for attempt in range(max_retries + 1):
+        try:
+            return parse_llm_response(call_gemini(client, model, prompt, max_tokens))
+        except _genai_errors.ClientError as exc:
+            if exc.code == 429:
+                wait = 60
+                logger.warning(
+                    "Gemini rate limit (attempt %d/%d). Waiting %ds...",
+                    attempt + 1, max_retries + 1, wait,
+                )
+                if attempt < max_retries:
+                    time.sleep(wait)
+                else:
+                    logger.warning("Exhausted retries on rate limit; skipping batch.")
+                    return []
+            else:
+                logger.error("Gemini API error (code %d): %s", exc.code, exc)
+                return []
+        except _genai_errors.ServerError as exc:
+            if exc.code == 503:
+                wait = 30
+                logger.warning(
+                    "Gemini overloaded (attempt %d/%d). Waiting %ds...",
+                    attempt + 1, max_retries + 1, wait,
+                )
+                if attempt < max_retries:
+                    time.sleep(wait)
+                else:
+                    logger.warning("Exhausted retries on overload; skipping batch.")
+                    return []
+            else:
+                logger.error("Gemini API error (code %d): %s", exc.code, exc)
+                return []
+        except ValueError as exc:
+            logger.warning("Could not parse LLM response for batch: %s", exc)
+            return []
+    return []
+
+
+def filter_batch(
+    client,
+    batch: list[dict],
+    research_interests: str,
+    model: str,
+    max_tokens: int,
+    provider: str,
+    max_retries: int = 2,
+) -> list[dict]:
+    """
+    Filter a single batch of articles with the configured LLM provider.
+    Dispatches to the provider-specific retry helper.
+    Returns list of dicts with keys: index, rationale.
+    """
+    logger = logging.getLogger(__name__)
+    prompt = build_prompt(research_interests, batch)
+    if provider == "gemini":
+        return _filter_batch_gemini(client, prompt, model, max_tokens, max_retries, logger)
+    else:
+        return _filter_batch_anthropic(client, prompt, model, max_tokens, max_retries, logger)
 
 
 def filter_new_articles(
