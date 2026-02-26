@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-claude_journal_filter.py
+ai_journal_filter.py
 
 Fetches scientific journal RSS feeds, filters articles against research
 interests using the Claude API, deduplicates via SQLite, and publishes a
 filtered RSS feed to a configurable path for static web serving.
 
 Run as a cron job:
-  0 */6 * * * /path/to/venv/bin/python /path/to/claude_journal_filter.py \
+  0 */6 * * * /path/to/venv/bin/python /path/to/ai_journal_filter.py \
       --config /path/to/config.yaml
 """
 
@@ -657,7 +657,7 @@ def main() -> None:
 
     setup_logging(config.get("logging", {}), config_dir)
     logger = logging.getLogger(__name__)
-    logger.info("Starting claude_journal_filter (config: %s)", config_path)
+    logger.info("Starting ai_journal_filter (config: %s)", config_path)
 
     provider = config.get("provider", "anthropic")
     logger.info("Using LLM provider: %s", provider)

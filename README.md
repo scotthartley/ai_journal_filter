@@ -1,4 +1,4 @@
-# claude_journal_filter
+# ai_journal_filter
 
 A cron-job script that fetches scientific journal RSS feeds, filters articles against your research interests using an LLM, and publishes a curated RSS feed you can subscribe to in any feed reader.
 
@@ -19,8 +19,8 @@ A cron-job script that fetches scientific journal RSS feeds, filters articles ag
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/claude_journal_filter.git
-cd claude_journal_filter
+git clone https://github.com/your-username/ai_journal_filter.git
+cd ai_journal_filter
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -86,7 +86,7 @@ The optional `rpm_limit` key (in either provider block) caps requests per minute
 ```bash
 export ANTHROPIC_API_KEY=sk-...   # or GEMINI_API_KEY
 source .venv/bin/activate
-python claude_journal_filter.py --config config.yaml
+python ai_journal_filter.py --config config.yaml
 ```
 
 The script will:
@@ -100,7 +100,7 @@ The script will:
 ### Running as a cron job
 
 ```cron
-0 */6 * * * /path/to/.venv/bin/python /path/to/claude_journal_filter.py --config /path/to/config.yaml
+0 */6 * * * /path/to/.venv/bin/python /path/to/ai_journal_filter.py --config /path/to/config.yaml
 ```
 
 All paths in `config.yaml` are resolved relative to the config file itself, so the script behaves consistently regardless of the working directory it is launched from.
