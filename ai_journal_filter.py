@@ -23,7 +23,10 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from logging.handlers import RotatingFileHandler
 
-import anthropic
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
 try:
     from google import genai
     from google.genai import types as _genai_types
