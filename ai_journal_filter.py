@@ -643,6 +643,14 @@ def main() -> None:
         default="config.yaml",
         help="Path to the YAML config file (default: config.yaml)",
     )
+    parser.add_argument(
+        "--skip-backlog",
+        action="store_true",
+        help=(
+            "Mark all current feed articles as seen without filtering them. "
+            "Useful on first run to avoid processing a large backlog."
+        ),
+    )
     args = parser.parse_args()
 
     # Resolve config path and directory for relative paths
@@ -700,12 +708,22 @@ def main() -> None:
         articles = fetch_all_feeds(feeds_config)
         logger.info("Total articles fetched across all feeds: %d", len(articles))
 
-        # Filter (dedup → mark seen → batch → LLM → save matches)
-        filter_new_articles(client, articles, conn, config, provider)
+        if args.skip_backlog:
+            # Mark all unseen articles as seen without filtering
+            new_articles = [a for a in articles if not is_seen(conn, a["url"])]
+            for article in new_articles:
+                mark_seen(conn, article["url"], article["feed_name"], article["title"])
+            logger.info(
+                "--skip-backlog: marked %d articles as seen, skipping LLM filtering.",
+                len(new_articles),
+            )
+        else:
+            # Filter (dedup → mark seen → batch → LLM → save matches)
+            filter_new_articles(client, articles, conn, config, provider)
 
-        # Generate output RSS from full DB history
-        output_config = config.get("output", {})
-        generate_output_feed(conn, output_config, config_dir)
+            # Generate output RSS from full DB history
+            output_config = config.get("output", {})
+            generate_output_feed(conn, output_config, config_dir)
 
         conn.close()
         logger.info("Done.")
