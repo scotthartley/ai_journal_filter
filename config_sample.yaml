@@ -1,0 +1,31 @@
+feeds:
+  - name: "Nature"
+    url: "https://www.nature.com/nature.rss"
+  - name: "Science"
+    url: "https://www.science.org/rss/news_current.xml"
+
+research_interests: |
+  I am interested in computational biology, specifically:
+  - Single-cell RNA sequencing analysis methods
+  - Protein structure prediction using machine learning
+  - CRISPR gene editing mechanisms and off-target effects
+
+database:
+  path: "journal_filter.db"
+
+anthropic:
+  model: "claude-opus-4-6"
+  batch_size: 20
+  max_tokens: 2048
+
+output:
+  rss_path: "filtered_feed.xml"
+  feed_title: "My Filtered Research Feed"
+  feed_link: "https://example.com/filtered_feed.xml"
+  feed_description: "Articles curated by Claude matching my research interests"
+  max_articles: 100
+  max_age_days: 30
+
+logging:
+  level: "INFO"
+  file: "journal_filter.log"

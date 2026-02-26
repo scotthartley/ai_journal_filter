@@ -1,0 +1,5 @@
+config.yaml
+journal_filter.*
+filtered_feed.xml
+.venv/*
+.claude/*
