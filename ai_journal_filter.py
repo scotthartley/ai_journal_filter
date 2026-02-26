@@ -3,7 +3,7 @@
 ai_journal_filter.py
 
 Fetches scientific journal RSS feeds, filters articles against research
-interests using the Claude API, deduplicates via SQLite, and publishes a
+interests using a configurable LLM API, deduplicates via SQLite, and publishes a
 filtered RSS feed to a configurable path for static web serving.
 
 Run as a cron job:
@@ -266,7 +266,7 @@ def fetch_all_feeds(feeds_config: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Claude Filtering
+# LLM Filtering
 # ---------------------------------------------------------------------------
 
 _PROMPT_TEMPLATE = """\
@@ -296,7 +296,7 @@ Example of a valid response:
 
 
 def build_prompt(research_interests: str, batch: list[dict]) -> str:
-    """Build the Claude prompt for a batch of articles."""
+    """Build the LLM prompt for a batch of articles."""
     articles_json = json.dumps(
         [
             {"index": i, "title": a["title"], "abstract": a["summary"][:1000]}
@@ -333,9 +333,9 @@ def call_gemini(client, model: str, prompt: str, max_tokens: int) -> str:
     return response.text
 
 
-def parse_claude_response(response_text: str) -> list[dict]:
+def parse_llm_response(response_text: str) -> list[dict]:
     """
-    Parse Claude's JSON array response.
+    Parse the LLM's JSON array response.
     First tries json.loads; falls back to regex extraction.
     Raises ValueError if neither succeeds.
     """
@@ -360,7 +360,7 @@ def parse_claude_response(response_text: str) -> list[dict]:
             pass
 
     raise ValueError(
-        f"Could not parse a JSON array from Claude response: {text[:200]!r}"
+        f"Could not parse a JSON array from LLM response: {text[:200]!r}"
     )
 
 
@@ -388,7 +388,7 @@ def filter_batch(
                 raw = call_gemini(client, model, prompt, max_tokens)
             else:
                 raw = call_claude(client, model, prompt, max_tokens)
-            return parse_claude_response(raw)
+            return parse_llm_response(raw)
         except anthropic.RateLimitError:
             wait = 60
             logger.warning(
@@ -597,7 +597,7 @@ def generate_output_feed(conn: sqlite3.Connection, output_config: dict, config_d
     fg.title(output_config.get("feed_title", "Filtered Research Feed"))
     fg.link(href=output_config.get("feed_link", "https://example.com/filtered_feed.xml"))
     fg.description(
-        output_config.get("feed_description", "Articles curated by Claude")
+        output_config.get("feed_description", "Articles curated by AI")
     )
     fg.language("en")
     fg.lastBuildDate(datetime.now(timezone.utc))
@@ -636,7 +636,7 @@ def generate_output_feed(conn: sqlite3.Connection, output_config: dict, config_d
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Filter scientific journal RSS feeds using Claude API."
+        description="Filter scientific journal RSS feeds using a configurable LLM API."
     )
     parser.add_argument(
         "--config",
