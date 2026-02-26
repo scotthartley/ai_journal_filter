@@ -24,8 +24,8 @@ provider: "anthropic"
 # Requires the ANTHROPIC_API_KEY environment variable.
 anthropic:
   model: "claude-opus-4-6"
-  batch_size: 20
-  max_tokens: 2048
+  batch_size: 50
+  max_tokens: 5000
   # rpm_limit: 50  # max requests per minute (0 or omit = no limit)
 
 # Google Gemini provider settings.
@@ -33,8 +33,8 @@ anthropic:
 # Requires the GEMINI_API_KEY environment variable.
 # gemini:
 #   model: "gemini-2.5-flash"
-#   batch_size: 20
-#   max_tokens: 4096
+#   batch_size: 50
+#   max_tokens: 10000
 #   rpm_limit: 10  # free tier is 10 RPM; paid tiers are higher
 
 output:
