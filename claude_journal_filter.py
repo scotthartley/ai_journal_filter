@@ -480,6 +480,8 @@ def filter_new_articles(
     model = llm_cfg.get("model", default_model)
     batch_size = int(llm_cfg.get("batch_size", 20))
     max_tokens = int(llm_cfg.get("max_tokens", 2048))
+    rpm_limit = int(llm_cfg.get("rpm_limit", 0))  # 0 = no limit
+    min_interval = 60.0 / rpm_limit if rpm_limit > 0 else 0.0
 
     # Deduplicate against DB
     new_articles = [a for a in articles if not is_seen(conn, a["url"])]
@@ -498,7 +500,15 @@ def filter_new_articles(
 
     # Process in batches
     matched = []
+    last_call_time: float | None = None
     for batch_start in range(0, len(new_articles), batch_size):
+        if min_interval > 0 and last_call_time is not None:
+            elapsed = time.monotonic() - last_call_time
+            wait = min_interval - elapsed
+            if wait > 0:
+                logger.debug("Rate limiting: waiting %.1fs before next batch.", wait)
+                time.sleep(wait)
+
         batch = new_articles[batch_start : batch_start + batch_size]
         logger.info(
             "Sending batch %d-%d to %s...",
@@ -506,6 +516,7 @@ def filter_new_articles(
             batch_start + len(batch) - 1,
             provider,
         )
+        last_call_time = time.monotonic()
         results = filter_batch(
             client, batch, research_interests, model, max_tokens, provider
         )

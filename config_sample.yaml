@@ -21,12 +21,14 @@ anthropic:
   model: "claude-opus-4-6"
   batch_size: 20
   max_tokens: 2048
+  # rpm_limit: 50  # max requests per minute (0 or omit = no limit)
 
 # Google Gemini — requires GEMINI_API_KEY environment variable
 # gemini:
 #   model: "gemini-2.5-flash"
 #   batch_size: 20
 #   max_tokens: 4096
+#   rpm_limit: 10  # free tier is 10 RPM; paid tiers are higher
 
 output:
   rss_path: "filtered_feed.xml"
