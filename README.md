@@ -25,7 +25,10 @@ cd ai_journal_filter
 python3 -m venv .venv
 source .venv/bin/activate
 
-pip install -r requirements.txt
+# Install with your preferred LLM provider:
+pip install -e ".[anthropic]"          # for Claude
+pip install -e ".[gemini]"             # for Google Gemini
+pip install -e ".[anthropic,gemini]"   # for both
 ```
 
 ## Configuration
@@ -86,7 +89,7 @@ The optional `rpm_limit` key (in either provider block) caps requests per minute
 ```bash
 export ANTHROPIC_API_KEY=sk-...   # or GEMINI_API_KEY
 source .venv/bin/activate
-python ai_journal_filter.py --config config.yaml
+ai-journal-filter --config config.yaml
 ```
 
 The script will:
@@ -100,7 +103,7 @@ The script will:
 ### Running as a cron job
 
 ```cron
-0 */6 * * * /path/to/.venv/bin/python /path/to/ai_journal_filter.py --config /path/to/config.yaml
+0 */6 * * * /path/to/.venv/bin/ai-journal-filter --config /path/to/config.yaml
 ```
 
 All paths in `config.yaml` are resolved relative to the config file itself, so the script behaves consistently regardless of the working directory it is launched from.

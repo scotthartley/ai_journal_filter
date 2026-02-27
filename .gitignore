@@ -3,6 +3,6 @@ journal_filter.*
 filtered_feed.xml
 .venv/*
 .claude/*
-__pycache__/*
+__pycache__/
 *.egg-info/
 dist/
