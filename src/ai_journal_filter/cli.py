@@ -295,7 +295,7 @@ Example of a valid response:
 """
 
 
-def build_prompt(research_interests: str, batch: list[dict]) -> str:
+def build_prompt(research_interests: str, batch: list[dict], template: str = _PROMPT_TEMPLATE) -> str:
     """Build the LLM prompt for a batch of articles."""
     articles_json = json.dumps(
         [
@@ -305,7 +305,7 @@ def build_prompt(research_interests: str, batch: list[dict]) -> str:
         ensure_ascii=False,
         indent=2,
     )
-    return _PROMPT_TEMPLATE.format(
+    return template.format(
         research_interests=research_interests.strip(),
         articles_json=articles_json,
     )
@@ -452,6 +452,7 @@ def filter_batch(
     max_tokens: int,
     provider: str,
     max_retries: int = 2,
+    template: str = _PROMPT_TEMPLATE,
 ) -> list[dict]:
     """
     Filter a single batch of articles with the configured LLM provider.
@@ -459,7 +460,7 @@ def filter_batch(
     Returns list of dicts with keys: index, rationale.
     """
     logger = logging.getLogger(__name__)
-    prompt = build_prompt(research_interests, batch)
+    prompt = build_prompt(research_interests, batch, template)
     if provider == "gemini":
         return _filter_batch_gemini(client, prompt, model, max_tokens, max_retries, logger)
     else:
@@ -483,6 +484,7 @@ def filter_new_articles(
     """
     logger = logging.getLogger(__name__)
     research_interests = config["research_interests"]
+    prompt_template = config.get("prompt_template", _PROMPT_TEMPLATE)
     llm_cfg = config.get(provider, {})
     default_model = "gemini-2.5-flash" if provider == "gemini" else "claude-opus-4-6"
     model = llm_cfg.get("model", default_model)
@@ -526,7 +528,8 @@ def filter_new_articles(
         )
         last_call_time = time.monotonic()
         results = filter_batch(
-            client, batch, research_interests, model, max_tokens, provider
+            client, batch, research_interests, model, max_tokens, provider,
+            template=prompt_template,
         )
 
         for result in results:

@@ -10,6 +10,42 @@ research_interests: |
   - Protein structure prediction using machine learning
   - CRISPR gene editing mechanisms and off-target effects
 
+# Optional: override the prompt sent to the LLM.
+# Must contain {research_interests} and {articles_json} placeholders.
+# Use {{ and }} to include literal braces in the prompt (e.g. in examples).
+# If omitted, the built-in default prompt is used.
+# prompt_template: |
+#   You are a research article relevance filter. Your task is to review a list
+#   of scientific article titles and abstracts, and identify which ones are
+#   relevant to the researcher's stated interests.
+#
+#   RESEARCHER'S INTERESTS:
+#   {research_interests}
+#
+#   ARTICLES TO EVALUATE:
+#   The following is a JSON array of articles, each with an "index" (0-based),
+#   "title", and "abstract".
+#
+#   {articles_json}
+#
+#   INSTRUCTIONS:
+#   - Evaluate each article against the researcher's interests.
+#   - Be conservative: only include an article if you are confident it is
+#     relevant. When the abstract is absent, very short, or appears to be
+#     metadata rather than a real abstract, apply a higher threshold — do not
+#     include the article based on vague or superficial title-keyword overlap
+#     alone.
+#   - Return ONLY a JSON array containing objects for articles that ARE relevant.
+#   - Each object must have exactly two fields:
+#       "index": the integer index of the article from the input array
+#       "rationale": a concise 1-3 sentence explanation of why this article is relevant
+#   - If NO articles are relevant, return an empty JSON array: []
+#   - Do NOT include any text before or after the JSON array.
+#   - Do NOT wrap the JSON in markdown code fences.
+#
+#   Example of a valid response:
+#   [{{"index": 0, "rationale": "..."}}]
+
 database:
   path: "journal_filter.db"
 
