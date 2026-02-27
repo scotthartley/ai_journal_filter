@@ -640,6 +640,54 @@ def generate_output_feed(conn: sqlite3.Connection, output_config: dict, config_d
     logger.info("Feed written to %s", rss_path)
 
 
+def generate_output_text(conn: sqlite3.Connection, output_config: dict, config_dir: str) -> None:
+    """Write matched articles as a formatted plain text file."""
+    import textwrap
+    logger = logging.getLogger(__name__)
+
+    max_articles = int(output_config.get("max_articles", 100))
+    max_age_days = int(output_config.get("max_age_days", 30))
+    text_path = output_config.get("text_path")
+    if not os.path.isabs(text_path):
+        text_path = os.path.join(config_dir, text_path)
+
+    rows = get_matched_articles(conn, max_articles, max_age_days)
+    logger.info("Generating text output with %d articles → %s", len(rows), text_path)
+
+    lines = []
+    title = output_config.get("feed_title", "Filtered Research Feed")
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    lines.append(title)
+    lines.append(f"Generated: {generated}")
+    lines.append("")
+
+    for i, row in enumerate(rows, start=1):
+        pub_dt = _parse_date_to_utc(row["published"])
+        pub_str = pub_dt.strftime("%Y-%m-%d") if row["published"] else ""
+
+        lines.append(f"{i}. {row['title']}")
+        if row["feed_name"]:
+            lines.append(f"   Source:  {row['feed_name']}")
+        if row["authors"]:
+            authors = " ".join(row["authors"].split())
+            lines.append(f"   Authors: {authors}")
+        if pub_str:
+            lines.append(f"   Date:    {pub_str}")
+        if row["rationale"]:
+            lines.append(f"   Match:   {row['rationale']}")
+        if row["summary"]:
+            wrapped = textwrap.fill(row["summary"], width=80,
+                                    initial_indent="   Abstract: ",
+                                    subsequent_indent="            ")
+            lines.append(wrapped)
+        lines.append(f"   Link:    {row['url']}")
+        lines.append("")
+
+    with open(text_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    logger.info("Text output written to %s", text_path)
+
+
 # ---------------------------------------------------------------------------
 # Entry Point
 # ---------------------------------------------------------------------------
@@ -731,9 +779,12 @@ def main() -> None:
             # Filter (dedup → mark seen → batch → LLM → save matches)
             filter_new_articles(client, articles, conn, config, provider)
 
-            # Generate output RSS from full DB history
+            # Generate output(s) from full DB history
             output_config = config.get("output", {})
-            generate_output_feed(conn, output_config, config_dir)
+            if output_config.get("rss_path"):
+                generate_output_feed(conn, output_config, config_dir)
+            if output_config.get("text_path"):
+                generate_output_text(conn, output_config, config_dir)
 
         conn.close()
         logger.info("Done.")
