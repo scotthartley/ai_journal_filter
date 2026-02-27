@@ -122,6 +122,11 @@ def init_db(db_path: str) -> sqlite3.Connection:
         conn.commit()
     except sqlite3.OperationalError:
         pass  # Column already exists
+    try:
+        conn.execute("ALTER TABLE matched_articles ADD COLUMN image_url TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     return conn
 
 
@@ -167,14 +172,15 @@ def save_matched_article(
     published: str | None,
     summary: str | None,
     rationale: str,
+    image_url: str | None = None,
 ) -> None:
     """Insert a matched article (INSERT OR IGNORE for idempotency)."""
     matched_at = datetime.now(timezone.utc).isoformat()
     conn.execute(
         "INSERT OR IGNORE INTO matched_articles "
-        "(url, feed_name, title, authors, published, summary, rationale, matched_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (url, feed_name, title, authors, published, summary, rationale, matched_at),
+        "(url, feed_name, title, authors, published, summary, rationale, image_url, matched_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (url, feed_name, title, authors, published, summary, rationale, image_url, matched_at),
     )
     conn.commit()
 
@@ -213,6 +219,22 @@ def prune_seen_articles(conn: sqlite3.Connection, prune_age_days: int) -> None:
 def _strip_html(raw: str) -> str:
     """Remove HTML tags from a string."""
     return re.sub(r"<[^>]+>", "", raw)
+
+
+def _extract_image_url(entry: dict) -> str | None:
+    """Extract the first image URL from feedparser media/enclosure fields."""
+    for media in entry.get("media_content", []):
+        url = media.get("url", "")
+        if url:
+            return url
+    for thumb in entry.get("media_thumbnail", []):
+        url = thumb.get("url", "")
+        if url:
+            return url
+    for enc in entry.get("enclosures", []):
+        if enc.get("type", "").startswith("image/") and enc.get("url"):
+            return enc["url"]
+    return None
 
 
 def fetch_feed(feed_config: dict) -> list[dict]:
@@ -280,6 +302,7 @@ def fetch_feed(feed_config: dict) -> list[dict]:
                 "summary": summary,
                 "authors": authors,
                 "published": published,
+                "image_url": _extract_image_url(entry),
             }
         )
 
@@ -591,6 +614,7 @@ def filter_new_articles(
                 published=article.get("published"),
                 summary=article.get("summary"),
                 rationale=rationale,
+                image_url=article.get("image_url"),
             )
             matched.append({**article, "rationale": rationale})
             logger.info("Matched: %s", article["title"][:80])
@@ -663,6 +687,8 @@ def generate_output_feed(conn: sqlite3.Connection, output_config: dict, config_d
 
         # Build HTML description
         desc_parts = []
+        if row["image_url"]:
+            desc_parts.append(f'<p><img src="{row["image_url"]}" alt="TOC graphic" /></p>')
         if row["feed_name"]:
             desc_parts.append(f"<p><strong>Source:</strong> {row['feed_name']}</p>")
         if row["authors"]:
