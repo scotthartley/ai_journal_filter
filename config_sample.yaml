@@ -48,6 +48,7 @@ research_interests: |
 
 database:
   path: "journal_filter.db"
+  prune_age_days: 90  # delete seen_articles entries older than this (0 = never prune)
 
 # Which LLM provider to use for filtering articles.
 # Options:

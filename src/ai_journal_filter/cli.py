@@ -113,13 +113,22 @@ def init_db(db_path: str) -> sqlite3.Connection:
             ON matched_articles(matched_at DESC);
     """)
     conn.commit()
+    # Schema migration: add llm_processed column if not already present.
+    # DEFAULT 1 means all existing rows are treated as already processed.
+    try:
+        conn.execute(
+            "ALTER TABLE seen_articles ADD COLUMN llm_processed INTEGER NOT NULL DEFAULT 1"
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     return conn
 
 
 def is_seen(conn: sqlite3.Connection, url: str) -> bool:
-    """Return True if url is already in seen_articles."""
+    """Return True if url is in seen_articles and was successfully LLM-processed."""
     row = conn.execute(
-        "SELECT 1 FROM seen_articles WHERE url = ?", (url,)
+        "SELECT 1 FROM seen_articles WHERE url = ? AND llm_processed = 1", (url,)
     ).fetchone()
     return row is not None
 
@@ -127,12 +136,24 @@ def is_seen(conn: sqlite3.Connection, url: str) -> bool:
 def mark_seen(
     conn: sqlite3.Connection, url: str, feed_name: str, title: str | None
 ) -> None:
-    """Insert url into seen_articles (INSERT OR IGNORE for idempotency)."""
+    """Insert url into seen_articles with llm_processed=0 (INSERT OR IGNORE for idempotency)."""
     fetched_at = datetime.now(timezone.utc).isoformat()
     conn.execute(
-        "INSERT OR IGNORE INTO seen_articles (url, feed_name, title, fetched_at) "
-        "VALUES (?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO seen_articles (url, feed_name, title, fetched_at, llm_processed) "
+        "VALUES (?, ?, ?, ?, 0)",
         (url, feed_name, title, fetched_at),
+    )
+    conn.commit()
+
+
+def mark_llm_processed(conn: sqlite3.Connection, urls: list[str]) -> None:
+    """Set llm_processed=1 for the given URLs after a successful LLM batch."""
+    if not urls:
+        return
+    placeholders = ",".join("?" * len(urls))
+    conn.execute(
+        f"UPDATE seen_articles SET llm_processed = 1 WHERE url IN ({placeholders})",
+        urls,
     )
     conn.commit()
 
@@ -173,6 +194,16 @@ def get_matched_articles(
         (cutoff, max_articles),
     ).fetchall()
     return rows
+
+
+def prune_seen_articles(conn: sqlite3.Connection, prune_age_days: int) -> None:
+    """Delete seen_articles entries older than prune_age_days days."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=prune_age_days)).isoformat()
+    cursor = conn.execute("DELETE FROM seen_articles WHERE fetched_at < ?", (cutoff,))
+    conn.commit()
+    logging.getLogger(__name__).info(
+        "Pruned %d old entries from seen_articles.", cursor.rowcount
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -364,8 +395,9 @@ def parse_llm_response(response_text: str) -> list[dict]:
 
 def _filter_batch_anthropic(
     client, prompt: str, model: str, max_tokens: int, max_retries: int, logger
-) -> list[dict]:
-    """Call Claude with retries for rate-limit and overload errors."""
+) -> list[dict] | None:
+    """Call Claude with retries for rate-limit and overload errors.
+    Returns a list of matched dicts on success, or None on failure (batch will be retried)."""
     for attempt in range(max_retries + 1):
         try:
             return parse_llm_response(call_claude(client, model, prompt, max_tokens))
@@ -378,8 +410,8 @@ def _filter_batch_anthropic(
             if attempt < max_retries:
                 time.sleep(wait)
             else:
-                logger.warning("Exhausted retries on rate limit; skipping batch.")
-                return []
+                logger.warning("Exhausted retries on rate limit; batch will be retried next run.")
+                return None
         except anthropic.APIStatusError as exc:
             if exc.status_code == 529:
                 wait = 30
@@ -390,21 +422,22 @@ def _filter_batch_anthropic(
                 if attempt < max_retries:
                     time.sleep(wait)
                 else:
-                    logger.warning("Exhausted retries on overload; skipping batch.")
-                    return []
+                    logger.warning("Exhausted retries on overload; batch will be retried next run.")
+                    return None
             else:
                 logger.error("Anthropic API error (status %d): %s", exc.status_code, exc)
-                return []
+                return None
         except ValueError as exc:
             logger.warning("Could not parse LLM response for batch: %s", exc)
-            return []
-    return []
+            return None
+    return None
 
 
 def _filter_batch_gemini(
     client, prompt: str, model: str, max_tokens: int, max_retries: int, logger
-) -> list[dict]:
-    """Call Gemini with retries for rate-limit and overload errors."""
+) -> list[dict] | None:
+    """Call Gemini with retries for rate-limit and overload errors.
+    Returns a list of matched dicts on success, or None on failure (batch will be retried)."""
     for attempt in range(max_retries + 1):
         try:
             return parse_llm_response(call_gemini(client, model, prompt, max_tokens))
@@ -418,11 +451,11 @@ def _filter_batch_gemini(
                 if attempt < max_retries:
                     time.sleep(wait)
                 else:
-                    logger.warning("Exhausted retries on rate limit; skipping batch.")
-                    return []
+                    logger.warning("Exhausted retries on rate limit; batch will be retried next run.")
+                    return None
             else:
                 logger.error("Gemini API error (code %d): %s", exc.code, exc)
-                return []
+                return None
         except _genai_errors.ServerError as exc:
             if exc.code == 503:
                 wait = 30
@@ -433,15 +466,15 @@ def _filter_batch_gemini(
                 if attempt < max_retries:
                     time.sleep(wait)
                 else:
-                    logger.warning("Exhausted retries on overload; skipping batch.")
-                    return []
+                    logger.warning("Exhausted retries on overload; batch will be retried next run.")
+                    return None
             else:
                 logger.error("Gemini API error (code %d): %s", exc.code, exc)
-                return []
+                return None
         except ValueError as exc:
             logger.warning("Could not parse LLM response for batch: %s", exc)
-            return []
-    return []
+            return None
+    return None
 
 
 def filter_batch(
@@ -453,11 +486,11 @@ def filter_batch(
     provider: str,
     max_retries: int = 2,
     template: str = _PROMPT_TEMPLATE,
-) -> list[dict]:
+) -> list[dict] | None:
     """
     Filter a single batch of articles with the configured LLM provider.
     Dispatches to the provider-specific retry helper.
-    Returns list of dicts with keys: index, rationale.
+    Returns list of dicts with keys: index, rationale on success, or None on failure.
     """
     logger = logging.getLogger(__name__)
     prompt = build_prompt(research_interests, batch, template)
@@ -532,6 +565,15 @@ def filter_new_articles(
             template=prompt_template,
         )
 
+        if results is None:
+            logger.warning(
+                "Batch %d-%d failed; articles will be retried next run.",
+                batch_start,
+                batch_start + len(batch) - 1,
+            )
+            continue
+
+        mark_llm_processed(conn, [a["url"] for a in batch])
         for result in results:
             idx = result.get("index")
             rationale = result.get("rationale", "")
@@ -756,6 +798,10 @@ def main() -> None:
         conn = init_db(db_path)
         logger.info("Database initialized: %s", db_path)
 
+        prune_age_days = int(config.get("database", {}).get("prune_age_days", 90))
+        if prune_age_days > 0:
+            prune_seen_articles(conn, prune_age_days)
+
         if provider == "gemini":
             client = genai.Client(api_key=api_key)
         else:
@@ -771,6 +817,8 @@ def main() -> None:
             new_articles = [a for a in articles if not is_seen(conn, a["url"])]
             for article in new_articles:
                 mark_seen(conn, article["url"], article["feed_name"], article["title"])
+            if new_articles:
+                mark_llm_processed(conn, [a["url"] for a in new_articles])
             logger.info(
                 "--skip-backlog: marked %d articles as seen, skipping LLM filtering.",
                 len(new_articles),
