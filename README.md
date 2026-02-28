@@ -8,12 +8,16 @@ A cron-job script that fetches scientific journal RSS feeds, filters articles ag
 - Filters articles in batches using **Anthropic Claude** or **Google Gemini**
 - Deduplicates via SQLite so articles are only evaluated once
 - Publishes a filtered RSS feed to a local file (suitable for static web serving)
+- Embeds TOC graphics from journal feeds directly in the output RSS
+- Optionally writes a plain text summary alongside the RSS feed
+- Configurable prompt template for fine-tuning LLM filtering behavior
 - Configurable rate limiting to stay within API quotas
+- Automatic pruning of old database entries
 - Designed to run unattended as a cron job
 
 ## Requirements
 
-- Python 3.12+
+- Python 3.10+
 - An [Anthropic API key](https://console.anthropic.com/) **or** a [Google Gemini API key](https://aistudio.google.com/apikey)
 
 ## Installation
@@ -45,11 +49,31 @@ Key sections:
 |---|---|
 | `feeds` | List of RSS/Atom feed URLs to fetch |
 | `research_interests` | Free-text description of your interests, used as the LLM prompt |
+| `prompt_template` | Optional: override the full prompt sent to the LLM (must contain `{research_interests}` and `{articles_json}` placeholders) |
 | `provider` | `"anthropic"` or `"gemini"` |
 | `anthropic` / `gemini` | Model, batch size, token limit, and optional rate cap |
-| `output` | Where to write the filtered RSS feed and how many articles to keep |
-| `database` | Path to the SQLite database file |
+| `output` | Output paths, feed metadata, and article retention settings (see below) |
+| `database` | Path and optional pruning age for the SQLite database |
 | `logging` | Log level and optional log file |
+
+### Output options
+
+| Key | Description |
+|---|---|
+| `rss_path` | Path to write the filtered RSS feed (required) |
+| `text_path` | Optional path to also write a plain text summary of matched articles |
+| `feed_title` | Title of the output RSS feed |
+| `feed_link` | Canonical URL of the output feed |
+| `feed_description` | Description of the output feed |
+| `max_articles` | Maximum number of articles to include in the output (default: 100) |
+| `max_age_days` | Exclude articles older than this many days from the output (default: 30) |
+
+### Database options
+
+| Key | Description |
+|---|---|
+| `path` | Path to the SQLite database file |
+| `prune_age_days` | Delete `seen_articles` entries older than this many days on each run (0 or omit = never prune) |
 
 ### Provider options
 
@@ -90,6 +114,12 @@ The optional `rpm_limit` key (in either provider block) caps requests per minute
 export ANTHROPIC_API_KEY=sk-...   # or GEMINI_API_KEY
 source .venv/bin/activate
 ai-journal-filter --config config.yaml
+```
+
+On first run against a feed with a large backlog, use `--skip-backlog` to mark all current articles as seen without filtering them, then let subsequent runs process only new articles:
+
+```bash
+ai-journal-filter --config config.yaml --skip-backlog
 ```
 
 The script will:
