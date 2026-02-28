@@ -26,9 +26,6 @@ A cron-job script that fetches scientific journal RSS feeds, filters articles ag
 git clone https://github.com/your-username/ai_journal_filter.git
 cd ai_journal_filter
 
-python3 -m venv .venv
-source .venv/bin/activate
-
 # Install with your preferred LLM provider:
 pip install -e ".[anthropic]"          # for Claude
 pip install -e ".[gemini]"             # for Google Gemini
@@ -112,7 +109,6 @@ The optional `rpm_limit` key (in either provider block) caps requests per minute
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...   # or GEMINI_API_KEY
-source .venv/bin/activate
 ai-journal-filter --config config.yaml
 ```
 
@@ -133,7 +129,7 @@ The script will:
 ### Running as a cron job
 
 ```cron
-0 */6 * * * /path/to/.venv/bin/ai-journal-filter --config /path/to/config.yaml
+0 */6 * * * /path/to/bin/ai-journal-filter --config /path/to/config.yaml
 ```
 
 All paths in `config.yaml` are resolved relative to the config file itself, so the script behaves consistently regardless of the working directory it is launched from.
