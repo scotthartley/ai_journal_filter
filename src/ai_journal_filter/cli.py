@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import socket
 import sqlite3
 import sys
 import time
@@ -222,7 +223,7 @@ def _strip_html(raw: str) -> str:
 
 
 def _extract_image_url(entry: dict) -> str | None:
-    """Extract the first image URL from feedparser media/enclosure fields."""
+    """Extract the first image URL from feedparser media/enclosure fields or HTML content."""
     for media in entry.get("media_content", []):
         url = media.get("url", "")
         if url:
@@ -234,6 +235,14 @@ def _extract_image_url(entry: dict) -> str | None:
     for enc in entry.get("enclosures", []):
         if enc.get("type", "").startswith("image/") and enc.get("url"):
             return enc["url"]
+    # Fallback: look for <img> in entry HTML content or summary
+    for html in [
+        next((c.get("value", "") for c in entry.get("content", [])), ""),
+        entry.get("summary", ""),
+    ]:
+        m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
+        if m:
+            return m.group(1)
     return None
 
 
@@ -248,7 +257,12 @@ def fetch_feed(feed_config: dict) -> list[dict]:
     logger = logging.getLogger(__name__)
 
     try:
-        parsed = feedparser.parse(url)
+        old_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(30)
+        try:
+            parsed = feedparser.parse(url)
+        finally:
+            socket.setdefaulttimeout(old_timeout)
     except Exception as exc:
         logger.warning("Failed to fetch feed '%s' (%s): %s", name, url, exc)
         return []
