@@ -23,7 +23,7 @@ A cron-job script that fetches scientific journal RSS feeds, filters articles ag
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/ai_journal_filter.git
+git clone https://github.com/scotthartley/ai_journal_filter.git
 cd ai_journal_filter
 
 # Install with your preferred LLM provider:
