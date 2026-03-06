@@ -38,6 +38,20 @@ from feedgen.feed import FeedGenerator
 
 
 # ---------------------------------------------------------------------------
+# Defaults
+# ---------------------------------------------------------------------------
+
+DEFAULT_PRUNE_AGE_DAYS = 90
+DEFAULT_MAX_ARTICLES = 100
+DEFAULT_MAX_AGE_DAYS = 30
+DEFAULT_BATCH_SIZE = 20
+DEFAULT_MAX_TOKENS = 2048
+DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-6"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_FEED_TIMEOUT = 30
+
+
+# ---------------------------------------------------------------------------
 # Config & Setup
 # ---------------------------------------------------------------------------
 
@@ -258,7 +272,7 @@ def fetch_feed(feed_config: dict) -> list[dict]:
 
     try:
         old_timeout = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(30)
+        socket.setdefaulttimeout(DEFAULT_FEED_TIMEOUT)
         try:
             parsed = feedparser.parse(url)
         finally:
@@ -556,10 +570,10 @@ def filter_new_articles(
     research_interests = config["research_interests"]
     prompt_template = config.get("prompt_template", _PROMPT_TEMPLATE)
     llm_cfg = config.get(provider, {})
-    default_model = "gemini-2.5-flash" if provider == "gemini" else "claude-opus-4-6"
+    default_model = DEFAULT_GEMINI_MODEL if provider == "gemini" else DEFAULT_ANTHROPIC_MODEL
     model = llm_cfg.get("model", default_model)
-    batch_size = int(llm_cfg.get("batch_size", 20))
-    max_tokens = int(llm_cfg.get("max_tokens", 2048))
+    batch_size = int(llm_cfg.get("batch_size", DEFAULT_BATCH_SIZE))
+    max_tokens = int(llm_cfg.get("max_tokens", DEFAULT_MAX_TOKENS))
     rpm_limit = int(llm_cfg.get("rpm_limit", 0))  # 0 = no limit
     min_interval = 60.0 / rpm_limit if rpm_limit > 0 else 0.0
 
@@ -674,8 +688,8 @@ def generate_output_feed(conn: sqlite3.Connection, output_config: dict, config_d
     """
     logger = logging.getLogger(__name__)
 
-    max_articles = int(output_config.get("max_articles", 100))
-    max_age_days = int(output_config.get("max_age_days", 30))
+    max_articles = int(output_config.get("max_articles", DEFAULT_MAX_ARTICLES))
+    max_age_days = int(output_config.get("max_age_days", DEFAULT_MAX_AGE_DAYS))
     rss_path = output_config.get("rss_path", "filtered_feed.xml")
     if not os.path.isabs(rss_path):
         rss_path = os.path.join(config_dir, rss_path)
@@ -727,8 +741,8 @@ def generate_output_text(conn: sqlite3.Connection, output_config: dict, config_d
     import textwrap
     logger = logging.getLogger(__name__)
 
-    max_articles = int(output_config.get("max_articles", 100))
-    max_age_days = int(output_config.get("max_age_days", 30))
+    max_articles = int(output_config.get("max_articles", DEFAULT_MAX_ARTICLES))
+    max_age_days = int(output_config.get("max_age_days", DEFAULT_MAX_AGE_DAYS))
     text_path = output_config.get("text_path")
     if not os.path.isabs(text_path):
         text_path = os.path.join(config_dir, text_path)
@@ -822,6 +836,12 @@ def main() -> None:
             logger.error("GEMINI_API_KEY environment variable is not set. Exiting.")
             sys.exit(1)
     else:
+        if anthropic is None:
+            logger.error(
+                "anthropic package not installed. "
+                "Run: pip install anthropic"
+            )
+            sys.exit(1)
         api_key = os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             logger.error(
@@ -838,7 +858,7 @@ def main() -> None:
         conn = init_db(db_path)
         logger.info("Database initialized: %s", db_path)
 
-        prune_age_days = int(config.get("database", {}).get("prune_age_days", 90))
+        prune_age_days = int(config.get("database", {}).get("prune_age_days", DEFAULT_PRUNE_AGE_DAYS))
         if prune_age_days > 0:
             prune_seen_articles(conn, prune_age_days)
 

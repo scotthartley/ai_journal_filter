@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai-journal-filter"
-version = "1.0.0b"
+version = "1.0.1b"
 description = "Filter scientific journal RSS feeds using a configurable LLM API"
 requires-python = ">=3.10"
 dependencies = [
