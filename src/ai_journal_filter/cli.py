@@ -416,26 +416,38 @@ def call_gemini(client, model: str, prompt: str, max_tokens: int) -> str:
 def parse_llm_response(response_text: str) -> list[dict]:
     """
     Parse the LLM's JSON array response.
-    First tries json.loads; falls back to regex extraction.
-    Raises ValueError if neither succeeds.
+    Handles markdown code fences, JSON object wrappers, and nested brackets.
+    Raises ValueError if no valid JSON array can be extracted.
     """
-    text = response_text.strip()
+    # Strip markdown code fences (models do this despite the prompt)
+    text = re.sub(r"^```(?:json)?\s*", "", response_text.strip(), flags=re.MULTILINE)
+    text = re.sub(r"^```\s*$", "", text, flags=re.MULTILINE)
+    text = text.strip()
+
+    def _extract_list(parsed):
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            for v in parsed.values():
+                if isinstance(v, list):
+                    return v
+        return None
 
     # Direct parse
     try:
-        result = json.loads(text)
-        if isinstance(result, list):
-            return result
+        lst = _extract_list(json.loads(text))
+        if lst is not None:
+            return lst
     except json.JSONDecodeError:
         pass
 
-    # Regex fallback: find the outermost [...] block
-    match = re.search(r"\[.*?\]", text, re.DOTALL)
+    # Regex fallback: greedy match from first '[' to last ']'
+    match = re.search(r"\[.*\]", text, re.DOTALL)
     if match:
         try:
-            result = json.loads(match.group())
-            if isinstance(result, list):
-                return result
+            lst = _extract_list(json.loads(match.group()))
+            if lst is not None:
+                return lst
         except json.JSONDecodeError:
             pass
 
@@ -626,11 +638,21 @@ def filter_new_articles(
 
         mark_llm_processed(conn, [a["url"] for a in batch])
         for result in results:
+            if not isinstance(result, dict):
+                logger.warning("LLM response item is not a dict: %r; skipping.", result)
+                continue
             idx = result.get("index")
             rationale = result.get("rationale", "")
-            if idx is None or not isinstance(idx, int) or idx >= len(batch):
+            try:
+                idx = int(idx)
+            except (TypeError, ValueError):
                 logger.warning("Invalid index %r in LLM response; skipping.", idx)
                 continue
+            if idx < 0 or idx >= len(batch):
+                logger.warning("Index %d out of range [0, %d); skipping.", idx, len(batch))
+                continue
+            if not isinstance(rationale, str):
+                rationale = str(rationale) if rationale is not None else ""
 
             article = batch[idx]
             save_matched_article(
