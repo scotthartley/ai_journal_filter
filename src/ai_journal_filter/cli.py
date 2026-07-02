@@ -779,7 +779,14 @@ def filter_new_articles(
                 batch_start + len(batch) - 1,
             )
 
-        resolved_urls = [a["url"] for a in batch_matched] + [a["url"] for a in batch_poison]
+        # Every article in `batch` was successfully evaluated (whether matched,
+        # confirmed-not-relevant, or isolated as poison) except those in
+        # batch_unresolved (API failures needing a whole-batch retry). Mark all
+        # of those processed — not just the ones that matched — otherwise the
+        # (usually much larger) set of correctly-evaluated-but-irrelevant
+        # articles gets resent to the LLM on every subsequent run.
+        unresolved_urls = {a["url"] for a in batch_unresolved}
+        resolved_urls = [a["url"] for a in batch if a["url"] not in unresolved_urls]
         if resolved_urls:
             mark_llm_processed(conn, resolved_urls)
 
