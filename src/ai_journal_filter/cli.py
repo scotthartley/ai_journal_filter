@@ -143,6 +143,13 @@ def init_db(db_path: str) -> sqlite3.Connection:
         conn.commit()
     except sqlite3.OperationalError:
         pass  # Column already exists
+    try:
+        conn.execute(
+            "ALTER TABLE matched_articles ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     return conn
 
 
@@ -189,14 +196,15 @@ def save_matched_article(
     summary: str | None,
     rationale: str,
     image_url: str | None = None,
+    needs_review: bool = False,
 ) -> None:
     """Insert a matched article (INSERT OR IGNORE for idempotency)."""
     matched_at = datetime.now(timezone.utc).isoformat()
     conn.execute(
         "INSERT OR IGNORE INTO matched_articles "
-        "(url, feed_name, title, authors, published, summary, rationale, image_url, matched_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (url, feed_name, title, authors, published, summary, rationale, image_url, matched_at),
+        "(url, feed_name, title, authors, published, summary, rationale, image_url, needs_review, matched_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (url, feed_name, title, authors, published, summary, rationale, image_url, int(needs_review), matched_at),
     )
     conn.commit()
 
@@ -486,7 +494,10 @@ def _filter_batch_anthropic(
     client, prompt: str, model: str, max_tokens: int, max_retries: int, logger
 ) -> list[dict] | None:
     """Call Claude with retries for rate-limit and overload errors.
-    Returns a list of matched dicts on success, or None on failure (batch will be retried)."""
+    Returns a list of matched dicts on success, or None on a retryable API failure
+    (batch will be retried next run). Raises ValueError if the response can't be
+    parsed (e.g. a content-based refusal) — callers wanting per-article isolation
+    of that case should use filter_batch_isolating() instead of calling this directly."""
     for attempt in range(max_retries + 1):
         try:
             return parse_llm_response(call_claude(client, model, prompt, max_tokens))
@@ -516,9 +527,6 @@ def _filter_batch_anthropic(
             else:
                 logger.error("Anthropic API error (status %d): %s", exc.status_code, exc)
                 return None
-        except ValueError as exc:
-            logger.warning("Could not parse LLM response for batch: %s", exc)
-            return None
     return None
 
 
@@ -526,7 +534,10 @@ def _filter_batch_gemini(
     client, prompt: str, model: str, max_tokens: int, max_retries: int, logger
 ) -> list[dict] | None:
     """Call Gemini with retries for rate-limit and overload errors.
-    Returns a list of matched dicts on success, or None on failure (batch will be retried)."""
+    Returns a list of matched dicts on success, or None on a retryable API failure
+    (batch will be retried next run). Raises ValueError if the response can't be
+    parsed (e.g. a content-based refusal) — callers wanting per-article isolation
+    of that case should use filter_batch_isolating() instead of calling this directly."""
     for attempt in range(max_retries + 1):
         try:
             return parse_llm_response(call_gemini(client, model, prompt, max_tokens))
@@ -560,9 +571,6 @@ def _filter_batch_gemini(
             else:
                 logger.error("Gemini API error (code %d): %s", exc.code, exc)
                 return None
-        except ValueError as exc:
-            logger.warning("Could not parse LLM response for batch: %s", exc)
-            return None
     return None
 
 
@@ -579,7 +587,10 @@ def filter_batch(
     """
     Filter a single batch of articles with the configured LLM provider.
     Dispatches to the provider-specific retry helper.
-    Returns list of dicts with keys: index, rationale on success, or None on failure.
+    Returns list of dicts with keys: index, rationale on success, or None on a
+    retryable API failure. Raises ValueError if the LLM response could not be
+    parsed (e.g. a content-based refusal) — callers wanting per-article isolation
+    of that case should use filter_batch_isolating() instead of calling this directly.
     """
     logger = logging.getLogger(__name__)
     prompt = build_prompt(research_interests, batch, template)
@@ -587,6 +598,108 @@ def filter_batch(
         return _filter_batch_gemini(client, prompt, model, max_tokens, max_retries, logger)
     else:
         return _filter_batch_anthropic(client, prompt, model, max_tokens, max_retries, logger)
+
+
+_NEEDS_REVIEW_RATIONALE = (
+    "Automated relevance filtering could not be completed for this article: "
+    "the LLM did not return a parseable classification response, possibly "
+    "due to a content-based refusal. This article has been flagged for "
+    "manual review rather than being silently dropped or retried forever."
+)
+
+
+def _resolve_matches(batch: list[dict], results: list, logger) -> list[dict]:
+    """Validate raw LLM {"index", "rationale"} items against batch and
+    resolve them into full article dicts with 'rationale' added."""
+    resolved = []
+    for result in results:
+        if not isinstance(result, dict):
+            logger.warning("LLM response item is not a dict: %r; skipping.", result)
+            continue
+        idx = result.get("index")
+        rationale = result.get("rationale", "")
+        try:
+            idx = int(idx)
+        except (TypeError, ValueError):
+            logger.warning("Invalid index %r in LLM response; skipping.", idx)
+            continue
+        if idx < 0 or idx >= len(batch):
+            logger.warning("Index %d out of range [0, %d); skipping.", idx, len(batch))
+            continue
+        if not isinstance(rationale, str):
+            rationale = str(rationale) if rationale is not None else ""
+
+        article = batch[idx]
+        resolved.append({**article, "rationale": rationale})
+    return resolved
+
+
+def filter_batch_isolating(
+    client,
+    batch: list[dict],
+    research_interests: str,
+    model: str,
+    max_tokens: int,
+    provider: str,
+    max_retries: int = 2,
+    template: str = _PROMPT_TEMPLATE,
+    logger=None,
+    on_before_call=None,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """
+    Filter a batch, bisecting on ValueError to isolate poison articles that
+    cause the LLM to refuse to return parseable output.
+
+    Returns (matched, poison, unresolved):
+    - matched: article dicts the LLM confirmed relevant.
+    - poison: single-article dicts where a batch-of-1 retry still raised
+      ValueError — confirmed refusal target, needs human review.
+    - unresolved: articles from a sub-batch that failed for a non-content
+      reason (filter_batch returned None). Left untouched; retried whole
+      next run, same as today.
+
+    on_before_call(), if given, runs before every actual LLM call (top-level
+    and bisection retries) — used for RPM pacing.
+    """
+    if logger is None:
+        logger = logging.getLogger(__name__)
+
+    if on_before_call is not None:
+        on_before_call()
+
+    try:
+        results = filter_batch(
+            client, batch, research_interests, model, max_tokens, provider,
+            max_retries=max_retries, template=template,
+        )
+    except ValueError as exc:
+        if len(batch) == 1:
+            logger.warning(
+                "Article flagged for manual review (LLM refused/unparseable response): %s (%s)",
+                batch[0].get("title", "")[:80], exc,
+            )
+            return [], [batch[0]], []
+        mid = len(batch) // 2
+        matched_a, poison_a, unresolved_a = filter_batch_isolating(
+            client, batch[:mid], research_interests, model, max_tokens, provider,
+            max_retries=max_retries, template=template, logger=logger,
+            on_before_call=on_before_call,
+        )
+        matched_b, poison_b, unresolved_b = filter_batch_isolating(
+            client, batch[mid:], research_interests, model, max_tokens, provider,
+            max_retries=max_retries, template=template, logger=logger,
+            on_before_call=on_before_call,
+        )
+        return (
+            matched_a + matched_b,
+            poison_a + poison_b,
+            unresolved_a + unresolved_b,
+        )
+
+    if results is None:
+        return [], [], list(batch)
+
+    return _resolve_matches(batch, results, logger), [], []
 
 
 def filter_new_articles(
@@ -632,15 +745,18 @@ def filter_new_articles(
 
     # Process in batches
     matched = []
-    last_call_time: float | None = None
-    for batch_start in range(0, len(new_articles), batch_size):
-        if min_interval > 0 and last_call_time is not None:
-            elapsed = time.monotonic() - last_call_time
+    last_call_time_box = {"t": None}
+
+    def _rate_limit() -> None:
+        if min_interval > 0 and last_call_time_box["t"] is not None:
+            elapsed = time.monotonic() - last_call_time_box["t"]
             wait = min_interval - elapsed
             if wait > 0:
-                logger.debug("Rate limiting: waiting %.1fs before next batch.", wait)
+                logger.debug("Rate limiting: waiting %.1fs before next LLM call.", wait)
                 time.sleep(wait)
+        last_call_time_box["t"] = time.monotonic()
 
+    for batch_start in range(0, len(new_articles), batch_size):
         batch = new_articles[batch_start : batch_start + batch_size]
         logger.info(
             "Sending batch %d-%d to %s...",
@@ -648,39 +764,26 @@ def filter_new_articles(
             batch_start + len(batch) - 1,
             provider,
         )
-        last_call_time = time.monotonic()
-        results = filter_batch(
+
+        batch_matched, batch_poison, batch_unresolved = filter_batch_isolating(
             client, batch, research_interests, model, max_tokens, provider,
-            template=prompt_template,
+            template=prompt_template, logger=logger, on_before_call=_rate_limit,
         )
 
-        if results is None:
+        if batch_unresolved:
             logger.warning(
-                "Batch %d-%d failed; articles will be retried next run.",
+                "%d article(s) in batch %d-%d failed for a non-content reason; "
+                "will be retried next run.",
+                len(batch_unresolved),
                 batch_start,
                 batch_start + len(batch) - 1,
             )
-            continue
 
-        mark_llm_processed(conn, [a["url"] for a in batch])
-        for result in results:
-            if not isinstance(result, dict):
-                logger.warning("LLM response item is not a dict: %r; skipping.", result)
-                continue
-            idx = result.get("index")
-            rationale = result.get("rationale", "")
-            try:
-                idx = int(idx)
-            except (TypeError, ValueError):
-                logger.warning("Invalid index %r in LLM response; skipping.", idx)
-                continue
-            if idx < 0 or idx >= len(batch):
-                logger.warning("Index %d out of range [0, %d); skipping.", idx, len(batch))
-                continue
-            if not isinstance(rationale, str):
-                rationale = str(rationale) if rationale is not None else ""
+        resolved_urls = [a["url"] for a in batch_matched] + [a["url"] for a in batch_poison]
+        if resolved_urls:
+            mark_llm_processed(conn, resolved_urls)
 
-            article = batch[idx]
+        for article in batch_matched:
             save_matched_article(
                 conn,
                 url=article["url"],
@@ -689,11 +792,26 @@ def filter_new_articles(
                 authors=article.get("authors"),
                 published=article.get("published"),
                 summary=article.get("summary"),
-                rationale=rationale,
+                rationale=article["rationale"],
                 image_url=article.get("image_url"),
             )
-            matched.append({**article, "rationale": rationale})
+            matched.append(article)
             logger.info("Matched: %s", article["title"][:80])
+
+        for article in batch_poison:
+            save_matched_article(
+                conn,
+                url=article["url"],
+                feed_name=article["feed_name"],
+                title=article["title"],
+                authors=article.get("authors"),
+                published=article.get("published"),
+                summary=article.get("summary"),
+                rationale=_NEEDS_REVIEW_RATIONALE,
+                image_url=article.get("image_url"),
+                needs_review=True,
+            )
+            logger.warning("Flagged for manual review: %s", article["title"][:80])
 
     logger.info("%s matched %d new articles.", provider.capitalize(), len(matched))
     return matched
@@ -758,7 +876,10 @@ def generate_output_feed(conn: sqlite3.Connection, output_config: dict, config_d
     for row in rows:
         fe = fg.add_entry()
         fe.id(row["url"])
-        fe.title(row["title"])
+        title = row["title"]
+        if row["needs_review"]:
+            title = f"⚠️ [Needs Review] {title}"
+        fe.title(title)
         fe.link(href=row["url"])
 
         # Build HTML description
@@ -769,7 +890,11 @@ def generate_output_feed(conn: sqlite3.Connection, output_config: dict, config_d
             desc_parts.append(f"<p><strong>Source:</strong> {row['feed_name']}</p>")
         if row["authors"]:
             desc_parts.append(f"<p><strong>Authors:</strong> {row['authors']}</p>")
-        if row["rationale"]:
+        if row["needs_review"]:
+            desc_parts.append(
+                f"<p><strong>⚠️ Needs manual review:</strong> {row['rationale']}</p>"
+            )
+        elif row["rationale"]:
             desc_parts.append(
                 f"<p><strong>Why it matches:</strong> {row['rationale']}</p>"
             )
@@ -817,7 +942,9 @@ def generate_output_text(conn: sqlite3.Connection, output_config: dict, config_d
             lines.append(f"   Authors: {authors}")
         if pub_str:
             lines.append(f"   Date:    {pub_str}")
-        if row["rationale"]:
+        if row["needs_review"]:
+            lines.append(f"   ⚠️ NEEDS MANUAL REVIEW: {row['rationale']}")
+        elif row["rationale"]:
             lines.append(f"   Match:   {row['rationale']}")
         if row["summary"]:
             wrapped = textwrap.fill(row["summary"], width=80,
