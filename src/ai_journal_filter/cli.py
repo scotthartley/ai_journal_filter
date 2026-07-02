@@ -400,7 +400,7 @@ def call_claude(client, model: str, prompt: str, max_tokens: int) -> str:
         max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
     )
-    return response.content[0].text
+    return next(block.text for block in response.content if block.type == "text")
 
 
 def call_gemini(client, model: str, prompt: str, max_tokens: int) -> str:
