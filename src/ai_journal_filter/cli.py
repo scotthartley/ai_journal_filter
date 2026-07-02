@@ -16,6 +16,7 @@ import socket
 import sqlite3
 import sys
 import time
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from logging.handlers import RotatingFileHandler
@@ -260,6 +261,23 @@ def _extract_image_url(entry: dict) -> str | None:
     return None
 
 
+_TRACKING_PARAM_PREFIXES = ("utm_",)
+_TRACKING_PARAM_NAMES = {"ff", "fc", "v", "gclid", "fbclid"}
+
+
+def _canonicalize_url(url: str) -> str:
+    """Strip volatile tracking/query params (e.g. PubMed's per-request `ff` timestamp)
+    so the same article yields a stable URL across fetches."""
+    parsed = urllib.parse.urlsplit(url)
+    kept = [
+        (k, v)
+        for k, v in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        if k not in _TRACKING_PARAM_NAMES and not k.startswith(_TRACKING_PARAM_PREFIXES)
+    ]
+    new_query = urllib.parse.urlencode(kept)
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, ""))
+
+
 def fetch_feed(feed_config: dict) -> list[dict]:
     """
     Parse a single RSS/Atom feed with feedparser.
@@ -295,6 +313,7 @@ def fetch_feed(feed_config: dict) -> list[dict]:
         link = entry.get("link") or entry.get("id") or ""
         if not link:
             continue
+        link = _canonicalize_url(link)
 
         title = entry.get("title", "").strip()
 
