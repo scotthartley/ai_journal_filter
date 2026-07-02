@@ -13,6 +13,8 @@ A cron-job script that fetches scientific journal RSS feeds, filters articles ag
 - Configurable prompt template for fine-tuning LLM filtering behavior
 - Configurable rate limiting to stay within API quotas
 - Automatic pruning of old database entries
+- Isolates individual articles that cause the LLM to refuse/return unparseable output, flagging them for manual review instead of blocking the whole batch
+- Optional run-report entry published in the feed itself, surfacing warnings/errors from a run
 - Designed to run unattended as a cron job
 
 ## Requirements
@@ -52,6 +54,7 @@ Key sections:
 | `output` | Output paths, feed metadata, and article retention settings (see below) |
 | `database` | Path and optional pruning age for the SQLite database |
 | `logging` | Log level and optional log file |
+| `reporting` | Optional run-report entry published in the output feed (see below) |
 
 ### Output options
 
@@ -104,6 +107,23 @@ Set the `GEMINI_API_KEY` environment variable before running.
 ### Rate limiting
 
 The optional `rpm_limit` key (in either provider block) caps requests per minute. The script enforces a minimum interval between batch API calls and will sleep as needed. Set to `0` or omit to disable.
+
+### Run reporting
+
+Since the log file otherwise goes unchecked, the script can append a synthetic entry to the published RSS feed summarizing each run:
+
+```yaml
+reporting:
+  mode: "off"  # "off" (default) | "on_issue" | "always"
+```
+
+- `off` — never publish a report entry
+- `on_issue` — only publish when a warning or error was logged during the run (e.g. a broken feed, an LLM retry, an article flagged for review)
+- `always` — publish every run, acting as a heartbeat
+
+### Manual review for unparseable articles
+
+If an article causes the LLM to refuse to respond or return unparseable output, the script bisects the batch to isolate the offending article rather than letting it block the rest of the batch indefinitely. The isolated article is still included in the output feed and text summary, marked `⚠️ [Needs Review]`, with a note to check it manually — it is not silently dropped or retried forever.
 
 ## Usage
 
