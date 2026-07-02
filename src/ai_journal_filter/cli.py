@@ -92,6 +92,18 @@ def setup_logging(logging_config: dict, config_dir: str) -> None:
     )
 
 
+class _RunReportHandler(logging.Handler):
+    """Collects WARNING+ records emitted during a run for optional inclusion
+    in the published RSS feed as a synthetic run-report entry."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.records: list[tuple[str, str]] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append((record.levelname, record.getMessage()))
+
+
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
@@ -854,10 +866,59 @@ def _parse_date_to_utc(date_str: str | None) -> datetime:
     return datetime.now(timezone.utc)
 
 
-def generate_output_feed(conn: sqlite3.Connection, output_config: dict, config_dir: str) -> None:
+def build_report_entry(
+    mode: str, records: list[tuple[str, str]], stats: dict
+) -> dict | None:
+    """
+    Build a synthetic run-report entry from collected log records, or None
+    if no report should be published this run.
+
+    mode: "off" (never), "on_issue" (only if records is non-empty), or
+    "always" (every run, as a heartbeat).
+    stats: dict with keys "feeds", "articles_fetched", "articles_matched".
+    """
+    if mode == "off":
+        return None
+    if mode == "on_issue" and not records:
+        return None
+
+    warnings = sum(1 for level, _ in records if level == "WARNING")
+    errors = sum(1 for level, _ in records if level not in ("WARNING", "INFO", "DEBUG"))
+
+    if not records:
+        title = "✅ Run Report: OK"
+    else:
+        parts = []
+        if warnings:
+            parts.append(f"{warnings} warning{'s' if warnings != 1 else ''}")
+        if errors:
+            parts.append(f"{errors} error{'s' if errors != 1 else ''}")
+        title = f"⚠️ Run Report: {', '.join(parts)}"
+
+    desc_parts = [
+        "<p>"
+        f"Feeds configured: {stats.get('feeds', 0)} &mdash; "
+        f"Articles fetched: {stats.get('articles_fetched', 0)} &mdash; "
+        f"New articles matched: {stats.get('articles_matched', 0)}"
+        "</p>"
+    ]
+    if records:
+        items = "".join(f"<li>[{level}] {message}</li>" for level, message in records)
+        desc_parts.append(f"<ul>{items}</ul>")
+
+    return {"title": title, "description": "".join(desc_parts)}
+
+
+def generate_output_feed(
+    conn: sqlite3.Connection,
+    output_config: dict,
+    config_dir: str,
+    report_entry: dict | None = None,
+) -> None:
     """
     Rebuild the full RSS feed from DB history (filtered by age/count).
     Embeds rationale + summary in the entry description.
+    If report_entry is given, adds a synthetic run-report entry to the feed.
     """
     logger = logging.getLogger(__name__)
 
@@ -911,6 +972,14 @@ def generate_output_feed(conn: sqlite3.Connection, output_config: dict, config_d
 
         pub_dt = _parse_date_to_utc(row["published"])
         fe.pubDate(pub_dt)
+
+    if report_entry is not None:
+        fe = fg.add_entry()
+        fe.id(f"urn:ai-journal-filter:report:{int(time.time())}")
+        fe.title(report_entry["title"])
+        fe.link(href=output_config.get("feed_link", "https://example.com/filtered_feed.xml"))
+        fe.description(report_entry["description"])
+        fe.pubDate(datetime.now(timezone.utc))
 
     fg.rss_file(rss_path, pretty=True)
     logger.info("Feed written to %s", rss_path)
@@ -1000,6 +1069,8 @@ def main() -> None:
         sys.exit(1)
 
     setup_logging(config.get("logging", {}), config_dir)
+    report_handler = _RunReportHandler()
+    logging.getLogger().addHandler(report_handler)
     logger = logging.getLogger(__name__)
     logger.info("Starting ai_journal_filter (config: %s)", config_path)
 
@@ -1067,12 +1138,20 @@ def main() -> None:
             )
         else:
             # Filter (dedup → mark seen → batch → LLM → save matches)
-            filter_new_articles(client, articles, conn, config, provider)
+            matched = filter_new_articles(client, articles, conn, config, provider)
+
+            report_mode = config.get("reporting", {}).get("mode", "off")
+            stats = {
+                "feeds": len(feeds_config),
+                "articles_fetched": len(articles),
+                "articles_matched": len(matched),
+            }
+            report_entry = build_report_entry(report_mode, report_handler.records, stats)
 
             # Generate output(s) from full DB history
             output_config = config.get("output", {})
             if output_config.get("rss_path"):
-                generate_output_feed(conn, output_config, config_dir)
+                generate_output_feed(conn, output_config, config_dir, report_entry=report_entry)
             if output_config.get("text_path"):
                 generate_output_text(conn, output_config, config_dir)
 

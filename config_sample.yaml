@@ -86,3 +86,13 @@ output:
 logging:
   level: "INFO"
   file: "journal_filter.log"
+
+# Optional: surface run health (warnings/errors logged during the run) as a
+# synthetic entry at the top of the published RSS feed. Useful since the log
+# file itself often goes unchecked. The entry reflects only the most recent
+# run and is not stored in the database — it's regenerated (or omitted)
+# fresh on every run.
+# reporting:
+#   mode: "off"  # "off" (default, no report entry) | "on_issue" (report only
+#                # when a WARNING or higher was logged) | "always" (report
+#                # every run, acts as a heartbeat)
