@@ -398,9 +398,16 @@ def call_claude(client, model: str, prompt: str, max_tokens: int) -> str:
     response = client.messages.create(
         model=model,
         max_tokens=max_tokens,
+        thinking={"type": "disabled"},
         messages=[{"role": "user", "content": prompt}],
     )
-    return next(block.text for block in response.content if block.type == "text")
+    for block in response.content:
+        if block.type == "text":
+            return block.text
+    raise ValueError(
+        f"No text block in Claude response (stop_reason={response.stop_reason!r}, "
+        f"block types={[b.type for b in response.content]!r})"
+    )
 
 
 def call_gemini(client, model: str, prompt: str, max_tokens: int) -> str:
