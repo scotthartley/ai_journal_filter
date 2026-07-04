@@ -895,8 +895,11 @@ def build_report_entry(
             parts.append(f"{errors} error{'s' if errors != 1 else ''}")
         title = f"⚠️ Run Report: {', '.join(parts)}"
 
+    run_dt = datetime.now(timezone.utc)
+
     desc_parts = [
         "<p>"
+        f"Run at: {run_dt.strftime('%Y-%m-%d %H:%M:%S UTC')} &mdash; "
         f"Feeds configured: {stats.get('feeds', 0)} &mdash; "
         f"Articles fetched: {stats.get('articles_fetched', 0)} &mdash; "
         f"New articles matched: {stats.get('articles_matched', 0)}"
@@ -906,7 +909,7 @@ def build_report_entry(
         items = "".join(f"<li>[{level}] {message}</li>" for level, message in records)
         desc_parts.append(f"<ul>{items}</ul>")
 
-    return {"title": title, "description": "".join(desc_parts)}
+    return {"title": title, "description": "".join(desc_parts), "run_dt": run_dt}
 
 
 def generate_output_feed(
@@ -974,12 +977,15 @@ def generate_output_feed(
         fe.pubDate(pub_dt)
 
     if report_entry is not None:
+        run_dt = report_entry["run_dt"]
+        run_stamp = run_dt.strftime("%Y%m%dT%H%M%SZ")
+        base_link = output_config.get("feed_link", "https://example.com/filtered_feed.xml")
         fe = fg.add_entry()
-        fe.id(f"urn:ai-journal-filter:report:{int(time.time())}")
+        fe.id(f"urn:ai-journal-filter:report:{run_stamp}")
         fe.title(report_entry["title"])
-        fe.link(href=output_config.get("feed_link", "https://example.com/filtered_feed.xml"))
+        fe.link(href=f"{base_link}#report-{run_stamp}")
         fe.description(report_entry["description"])
-        fe.pubDate(datetime.now(timezone.utc))
+        fe.pubDate(run_dt)
 
     fg.rss_file(rss_path, pretty=True)
     logger.info("Feed written to %s", rss_path)
