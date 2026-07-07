@@ -50,6 +50,8 @@ DEFAULT_MAX_TOKENS = 2048
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-6"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_FEED_TIMEOUT = 30
+FEED_FETCH_RETRIES = 2
+FEED_RETRY_DELAY = 5
 
 
 # ---------------------------------------------------------------------------
@@ -302,31 +304,51 @@ def fetch_feed(feed_config: dict) -> list[dict]:
     """
     Parse a single RSS/Atom feed with feedparser.
     Strips HTML from summary, truncates to 1000 chars.
-    Logs a warning and returns [] on error.
+    Retries transient fetch failures / malformed-empty responses a couple of
+    times before giving up. Logs a warning and returns [] if all attempts fail.
     """
     name = feed_config.get("name", "unknown")
     url = feed_config.get("url", "")
     logger = logging.getLogger(__name__)
 
-    try:
-        old_timeout = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(DEFAULT_FEED_TIMEOUT)
+    parsed = None
+    for attempt in range(FEED_FETCH_RETRIES + 1):
         try:
-            parsed = feedparser.parse(url)
-        finally:
-            socket.setdefaulttimeout(old_timeout)
-    except Exception as exc:
-        logger.warning("Failed to fetch feed '%s' (%s): %s", name, url, exc)
-        return []
+            old_timeout = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(DEFAULT_FEED_TIMEOUT)
+            try:
+                parsed = feedparser.parse(url)
+            finally:
+                socket.setdefaulttimeout(old_timeout)
+        except Exception as exc:
+            if attempt < FEED_FETCH_RETRIES:
+                logger.info(
+                    "Failed to fetch feed '%s' (%s) on attempt %d/%d: %s. Retrying in %ds...",
+                    name, url, attempt + 1, FEED_FETCH_RETRIES + 1, exc, FEED_RETRY_DELAY,
+                )
+                time.sleep(FEED_RETRY_DELAY)
+                continue
+            logger.warning("Failed to fetch feed '%s' (%s): %s", name, url, exc)
+            return []
 
-    if parsed.get("bozo") and not parsed.get("entries"):
-        logger.warning(
-            "Feed '%s' (%s) returned a malformed/empty response: %s",
-            name,
-            url,
-            parsed.get("bozo_exception", "unknown error"),
-        )
-        return []
+        if parsed.get("bozo") and not parsed.get("entries"):
+            if attempt < FEED_FETCH_RETRIES:
+                logger.info(
+                    "Feed '%s' (%s) returned a malformed/empty response on attempt %d/%d: %s. Retrying in %ds...",
+                    name, url, attempt + 1, FEED_FETCH_RETRIES + 1,
+                    parsed.get("bozo_exception", "unknown error"), FEED_RETRY_DELAY,
+                )
+                time.sleep(FEED_RETRY_DELAY)
+                continue
+            logger.warning(
+                "Feed '%s' (%s) returned a malformed/empty response: %s",
+                name,
+                url,
+                parsed.get("bozo_exception", "unknown error"),
+            )
+            return []
+
+        break
 
     articles = []
     for entry in parsed.entries:
