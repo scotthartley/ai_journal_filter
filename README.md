@@ -83,7 +83,7 @@ Key sections:
 provider: "anthropic"
 
 anthropic:
-  model: "claude-opus-4-6"
+  model: "claude-sonnet-5-5"
   batch_size: 20
   max_tokens: 2048
 ```

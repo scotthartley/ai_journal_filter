@@ -47,7 +47,7 @@ DEFAULT_MAX_ARTICLES = 100
 DEFAULT_MAX_AGE_DAYS = 30
 DEFAULT_BATCH_SIZE = 20
 DEFAULT_MAX_TOKENS = 2048
-DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-6"
+DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5-5"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_FEED_TIMEOUT = 30
 FEED_FETCH_RETRIES = 2
@@ -459,7 +459,7 @@ def call_claude(client, model: str, prompt: str, max_tokens: int) -> str:
     response = client.messages.create(
         model=model,
         max_tokens=max_tokens,
-        thinking={"type": "disabled"},
+        thinking={"type": "between_tools"},
         messages=[{"role": "user", "content": prompt}],
     )
     for block in response.content:

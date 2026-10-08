@@ -60,7 +60,7 @@ provider: "anthropic"
 # Only used when provider is set to "anthropic".
 # Requires the ANTHROPIC_API_KEY environment variable.
 anthropic:
-  model: "claude-opus-4-6"
+  model: "claude-sonnet-5-5"
   batch_size: 50
   max_tokens: 5000
   # rpm_limit: 50  # max requests per minute (0 or omit = no limit)
