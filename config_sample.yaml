@@ -3,6 +3,12 @@ feeds:
     url: "https://www.nature.com/nature.rss"
   - name: "Science"
     url: "https://www.science.org/rss/news_current.xml"
+  # PubMed journal feeds (https://pubmed.ncbi.nlm.nih.gov/rss/journals/<NLM ID>/)
+  # are fetched through NCBI E-utilities, since PubMed's RSS endpoint now serves
+  # a bot challenge to scripts. `limit` sets how many recent articles to fetch.
+  # PubMed *search* feeds (/rss/search/...) can't be rerouted and won't work.
+  # - name: "J Am Chem Soc"
+  #   url: "https://pubmed.ncbi.nlm.nih.gov/rss/journals/7503056/?limit=100"
 
 research_interests: |
   I am interested in computational biology, specifically:
@@ -45,6 +51,13 @@ research_interests: |
 #
 #   Example of a valid response:
 #   [{{"index": 0, "rationale": "..."}}]
+
+# Optional: identify yourself to NCBI E-utilities (used for PubMed journal
+# feeds). An API key raises NCBI's rate limit from 3 to 10 requests/second;
+# get one from your NCBI account settings.
+# pubmed:
+#   email: "you@example.com"
+#   api_key: "..."
 
 database:
   path: "journal_filter.db"

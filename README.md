@@ -5,6 +5,7 @@ A cron-job script that fetches scientific journal RSS feeds, filters articles ag
 ## Features
 
 - Fetches any number of RSS/Atom feeds
+- Fetches PubMed journal feeds through NCBI E-utilities (PubMed's own RSS endpoint now blocks scripts)
 - Filters articles in batches using **Anthropic Claude** or **Google Gemini**
 - Deduplicates via SQLite so articles are only evaluated once
 - Publishes a filtered RSS feed to a local file (suitable for static web serving)
@@ -46,13 +47,14 @@ Key sections:
 
 | Section | Description |
 |---|---|
-| `feeds` | List of RSS/Atom feed URLs to fetch |
+| `feeds` | List of RSS/Atom feed URLs to fetch (PubMed journal feeds are handled specially, see below) |
 | `research_interests` | Free-text description of your interests, used as the LLM prompt |
 | `prompt_template` | Optional: override the full prompt sent to the LLM (must contain `{research_interests}` and `{articles_json}` placeholders) |
 | `provider` | `"anthropic"` or `"gemini"` |
 | `anthropic` / `gemini` | Model, batch size, token limit, and optional rate cap |
 | `output` | Output paths, feed metadata, and article retention settings (see below) |
 | `database` | Path and optional pruning age for the SQLite database |
+| `pubmed` | Optional contact email and API key for NCBI E-utilities (see below) |
 | `logging` | Log level and optional log file |
 | `reporting` | Optional run-report entry published in the output feed (see below) |
 
@@ -107,6 +109,20 @@ Set the `GEMINI_API_KEY` environment variable before running.
 ### Rate limiting
 
 The optional `rpm_limit` key (in either provider block) caps requests per minute. The script enforces a minimum interval between batch API calls and will sleep as needed. Set to `0` or omit to disable.
+
+### PubMed feeds
+
+PubMed's RSS endpoint now answers scripted requests with a reCAPTCHA page instead of a feed. Journal feed URLs of the form `https://pubmed.ncbi.nlm.nih.gov/rss/journals/<NLM ID>/?limit=N` are therefore detected and fetched through the [NCBI E-utilities API](https://www.ncbi.nlm.nih.gov/books/NBK25501/) (`esearch` + `efetch`) instead. Existing configs need no changes. `limit` (default 100) sets how many of the most recently added articles to fetch, and article URLs are the same `https://pubmed.ncbi.nlm.nih.gov/<PMID>/` links as before, so previously seen articles are not re-evaluated.
+
+PubMed *search* feeds (`/rss/search/<id>/`) can't be rerouted, because their ID can't be turned back into a query. The script logs a warning saying the feed is behind a bot challenge. Replace these with journal feeds.
+
+Optionally identify yourself to NCBI (an API key raises the rate limit from 3 to 10 requests/second):
+
+```yaml
+pubmed:
+  email: "you@example.com"
+  api_key: "..."
+```
 
 ### Run reporting
 

@@ -35,11 +35,11 @@ There are no automated tests or linting configuration. The project has no `pytes
 
 ## Architecture
 
-All logic lives in a single file: `src/ai_journal_filter/cli.py` (~900 lines).
+All logic lives in a single file: `src/ai_journal_filter/cli.py` (~1300 lines).
 
 ### Data Flow
 
-1. **Fetch** — `fetch_all_feeds()` retrieves article metadata from configured RSS/Atom URLs via `feedparser`; `_canonicalize_url()` strips volatile tracking/query params (e.g. PubMed's per-request `ff` timestamp, `utm_*`) so the same article yields a stable URL across fetches
+1. **Fetch** — `fetch_all_feeds()` retrieves article metadata from configured RSS/Atom URLs via `feedparser`; `_canonicalize_url()` strips volatile tracking/query params (e.g. PubMed's per-request `ff` timestamp, `utm_*`) so the same article yields a stable URL across fetches; PubMed journal RSS URLs (`/rss/journals/<NLM ID>/`) are detected in `fetch_feed()` and routed to `_fetch_pubmed_articles()`, which uses NCBI E-utilities (`esearch`/`efetch`, stdlib `urllib` + `ElementTree`) because PubMed's RSS endpoint serves a reCAPTCHA page to scripts — article URLs are emitted as `https://pubmed.ncbi.nlm.nih.gov/<PMID>/` to match the canonicalized old RSS links so existing dedup rows still match; both paths share `_fetch_with_retries()`, and an HTML bot-challenge response on the generic path is reported as such (not "malformed") and not retried
 2. **Deduplicate** — `is_seen()` checks SQLite; new articles are marked seen via `mark_seen()` before LLM calls
 3. **Filter** — `filter_new_articles()` batches articles and calls `filter_batch_isolating()`, which calls `filter_batch()` (dispatching to `_filter_batch_anthropic()` or `_filter_batch_gemini()`) and bisects the batch on `ValueError` to isolate any single article that causes the LLM to refuse/return unparseable output
 4. **Persist** — Matched articles saved to `matched_articles` table; isolated "poison" articles are also saved there with `needs_review=1` and a fixed non-LLM rationale; `mark_llm_processed()` updates the `seen_articles` table for every article in the batch except ones left unresolved by an API failure (not just matches/poison — see git history on the `aa188f0` fix)
@@ -76,6 +76,7 @@ Based on `config_sample.yaml`. Key sections:
 - `anthropic` / `gemini`: model, batch size, token limit, optional RPM cap
 - `output`: RSS file path, feed metadata, `max_articles`, `max_age_days`
 - `database`: SQLite path, optional `prune_age_days`
+- `pubmed`: optional `email`/`api_key` passed to NCBI E-utilities
 - `logging`: level, optional file path
 
 `config.yaml` and output files are gitignored by default.

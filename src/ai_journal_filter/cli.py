@@ -17,8 +17,10 @@ import sqlite3
 import sys
 import time
 import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
+from email.utils import format_datetime, parsedate_to_datetime
 from logging.handlers import RotatingFileHandler
 
 try:
@@ -52,6 +54,9 @@ DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_FEED_TIMEOUT = 30
 FEED_FETCH_RETRIES = 2
 FEED_RETRY_DELAY = 5
+DEFAULT_PUBMED_LIMIT = 100
+EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+EUTILS_REQUEST_DELAY = 0.4  # keyless NCBI limit is 3 req/s
 
 
 # ---------------------------------------------------------------------------
@@ -300,26 +305,38 @@ def _canonicalize_url(url: str) -> str:
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, ""))
 
 
-def fetch_feed(feed_config: dict) -> list[dict]:
-    """
-    Parse a single RSS/Atom feed with feedparser.
-    Strips HTML from summary, truncates to 1000 chars.
-    Retries transient fetch failures / malformed-empty responses a couple of
-    times before giving up. Logs a warning and returns [] if all attempts fail.
-    """
-    name = feed_config.get("name", "unknown")
-    url = feed_config.get("url", "")
-    logger = logging.getLogger(__name__)
+class _BadFeedResponse(Exception):
+    """A fetch that completed but returned unusable content.
 
-    parsed = None
+    The message completes the sentence "Feed '<name>' (<url>) ...". Set
+    retryable=False when retrying cannot help (e.g. a bot challenge page).
+    """
+
+    def __init__(self, message: str, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
+
+
+def _fetch_with_retries(name: str, url: str, fetch):
+    """
+    Call fetch() up to FEED_FETCH_RETRIES + 1 times, sleeping FEED_RETRY_DELAY
+    between attempts. Returns fetch()'s result, or None (after logging a
+    warning) if every attempt failed.
+    """
+    logger = logging.getLogger(__name__)
     for attempt in range(FEED_FETCH_RETRIES + 1):
         try:
-            old_timeout = socket.getdefaulttimeout()
-            socket.setdefaulttimeout(DEFAULT_FEED_TIMEOUT)
-            try:
-                parsed = feedparser.parse(url)
-            finally:
-                socket.setdefaulttimeout(old_timeout)
+            return fetch()
+        except _BadFeedResponse as exc:
+            if exc.retryable and attempt < FEED_FETCH_RETRIES:
+                logger.info(
+                    "Feed '%s' (%s) %s on attempt %d/%d. Retrying in %ds...",
+                    name, url, exc, attempt + 1, FEED_FETCH_RETRIES + 1, FEED_RETRY_DELAY,
+                )
+                time.sleep(FEED_RETRY_DELAY)
+                continue
+            logger.warning("Feed '%s' (%s) %s", name, url, exc)
+            return None
         except Exception as exc:
             if attempt < FEED_FETCH_RETRIES:
                 logger.info(
@@ -329,26 +346,188 @@ def fetch_feed(feed_config: dict) -> list[dict]:
                 time.sleep(FEED_RETRY_DELAY)
                 continue
             logger.warning("Failed to fetch feed '%s' (%s): %s", name, url, exc)
-            return []
+            return None
+    return None
 
-        if parsed.get("bozo") and not parsed.get("entries"):
-            if attempt < FEED_FETCH_RETRIES:
-                logger.info(
-                    "Feed '%s' (%s) returned a malformed/empty response on attempt %d/%d: %s. Retrying in %ds...",
-                    name, url, attempt + 1, FEED_FETCH_RETRIES + 1,
-                    parsed.get("bozo_exception", "unknown error"), FEED_RETRY_DELAY,
-                )
-                time.sleep(FEED_RETRY_DELAY)
-                continue
-            logger.warning(
-                "Feed '%s' (%s) returned a malformed/empty response: %s",
-                name,
-                url,
-                parsed.get("bozo_exception", "unknown error"),
+
+_PUBMED_JOURNAL_RSS_RE = re.compile(r"^https?://pubmed\.ncbi\.nlm\.nih\.gov/rss/journals/(\d+)/?")
+_PUBMED_SEARCH_RSS_RE = re.compile(r"^https?://pubmed\.ncbi\.nlm\.nih\.gov/rss/search/")
+
+
+def _is_bot_challenge(parsed) -> bool:
+    """True if feedparser got an HTML bot-challenge page (e.g. reCAPTCHA) instead of a feed."""
+    content_type = (parsed.get("headers") or {}).get("content-type", "")
+    if "html" not in content_type.lower():
+        return False
+    # feedparser keeps the HTML's <base>/<meta>/etc. in parsed.feed
+    page = str(parsed.get("feed", "")).lower()
+    return "recaptcha" in page or "challenge" in page
+
+
+def _eutils_request(endpoint: str, params: dict, post: bool = False) -> ET.Element:
+    """Call an NCBI E-utilities endpoint and return the parsed XML root."""
+    query = urllib.parse.urlencode(params)
+    url = EUTILS_BASE + endpoint
+    if post:
+        req = urllib.request.Request(url, data=query.encode("ascii"))
+    else:
+        req = urllib.request.Request(f"{url}?{query}")
+    try:
+        with urllib.request.urlopen(req, timeout=DEFAULT_FEED_TIMEOUT) as resp:
+            return ET.fromstring(resp.read())
+    finally:
+        # Space out consecutive NCBI calls, including across feeds/retries
+        time.sleep(EUTILS_REQUEST_DELAY)
+
+
+def _pubmed_date(article_el: ET.Element) -> str | None:
+    """Return the entrez (else pubmed) History date as an RFC 2822 string."""
+    for status in ("entrez", "pubmed"):
+        el = article_el.find(f"PubmedData/History/PubMedPubDate[@PubStatus='{status}']")
+        if el is None:
+            continue
+        try:
+            dt = datetime(
+                int(el.findtext("Year")),
+                int(el.findtext("Month")),
+                int(el.findtext("Day")),
+                int(el.findtext("Hour") or 0),
+                int(el.findtext("Minute") or 0),
+                tzinfo=timezone.utc,
             )
-            return []
+        except (TypeError, ValueError):
+            continue
+        return format_datetime(dt)
+    return None
 
-        break
+
+def _pubmed_authors(article_el: ET.Element) -> str | None:
+    names = []
+    for author in article_el.findall("MedlineCitation/Article/AuthorList/Author"):
+        collective = author.findtext("CollectiveName")
+        if collective:
+            names.append(collective.strip())
+            continue
+        first = (author.findtext("ForeName") or author.findtext("Initials") or "").strip()
+        last = (author.findtext("LastName") or "").strip()
+        full = f"{first} {last}".strip()
+        if full:
+            names.append(full)
+    return ", ".join(names) if names else None
+
+
+def _fetch_pubmed_articles(name: str, nlmid: str, limit: int, pubmed_config: dict) -> list[dict]:
+    """
+    Fetch the most recently added articles for an NLM journal ID via NCBI
+    E-utilities (esearch + efetch). Used in place of PubMed's journal RSS,
+    which now serves a bot-challenge page to scripted clients.
+    """
+    base_params = {"tool": "ai_journal_filter"}
+    if pubmed_config.get("email"):
+        base_params["email"] = pubmed_config["email"]
+    if pubmed_config.get("api_key"):
+        base_params["api_key"] = pubmed_config["api_key"]
+
+    search = _eutils_request(
+        "esearch.fcgi",
+        {**base_params, "db": "pubmed", "term": f"{nlmid}[nlmid]", "retmax": limit},
+    )
+    pmids = [el.text for el in search.findall("IdList/Id") if el.text]
+    if not pmids:
+        raise _BadFeedResponse(f"returned no PubMed results for NLM ID {nlmid}")
+
+    root = _eutils_request(
+        "efetch.fcgi",
+        {**base_params, "db": "pubmed", "id": ",".join(pmids), "retmode": "xml"},
+        post=True,
+    )
+
+    articles = []
+    for article_el in root.findall("PubmedArticle"):
+        pmid = article_el.findtext("MedlineCitation/PMID")
+        if not pmid:
+            continue
+        title_el = article_el.find("MedlineCitation/Article/ArticleTitle")
+        title = "".join(title_el.itertext()).strip() if title_el is not None else ""
+        sections = []
+        for abs_el in article_el.findall("MedlineCitation/Article/Abstract/AbstractText"):
+            text = "".join(abs_el.itertext()).strip()
+            if not text:
+                continue
+            label = abs_el.get("Label")
+            sections.append(f"{label}: {text}" if label else text)
+        articles.append(
+            {
+                # Matches what _canonicalize_url() made of the old RSS links,
+                # so existing seen_articles rows still dedupe.
+                "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                "feed_name": name,
+                "title": title,
+                "summary": _strip_html(" ".join(sections)),
+                "authors": _pubmed_authors(article_el),
+                "published": _pubmed_date(article_el),
+                "image_url": None,
+            }
+        )
+    return articles
+
+
+def fetch_feed(feed_config: dict, pubmed_config: dict | None = None) -> list[dict]:
+    """
+    Parse a single RSS/Atom feed with feedparser.
+    PubMed journal RSS URLs are routed through NCBI E-utilities instead.
+    Retries transient fetch failures / malformed-empty responses a couple of
+    times before giving up. Logs a warning and returns [] if all attempts fail.
+    """
+    name = feed_config.get("name", "unknown")
+    url = feed_config.get("url", "")
+    logger = logging.getLogger(__name__)
+
+    m = _PUBMED_JOURNAL_RSS_RE.match(url)
+    if m:
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        try:
+            limit = int(query.get("limit", [DEFAULT_PUBMED_LIMIT])[0])
+        except ValueError:
+            limit = DEFAULT_PUBMED_LIMIT
+        articles = _fetch_with_retries(
+            name, url, lambda: _fetch_pubmed_articles(name, m.group(1), limit, pubmed_config or {})
+        )
+        if articles is None:
+            return []
+        logger.info("Fetched %d articles from feed '%s' (via NCBI E-utilities)", len(articles), name)
+        return articles
+
+    def _parse():
+        old_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(DEFAULT_FEED_TIMEOUT)
+        try:
+            parsed = feedparser.parse(url)
+        finally:
+            socket.setdefaulttimeout(old_timeout)
+        if parsed.get("bozo") and not parsed.get("entries"):
+            if _is_bot_challenge(parsed):
+                hint = ""
+                if _PUBMED_SEARCH_RSS_RE.match(url):
+                    hint = (
+                        " A PubMed search feed's ID can't be converted back into its search query, so it "
+                        "can't be rerouted automatically; replace it with a journal feed URL "
+                        "(https://pubmed.ncbi.nlm.nih.gov/rss/journals/<NLM ID>/), which is fetched via "
+                        "NCBI E-utilities."
+                    )
+                raise _BadFeedResponse(
+                    "is behind a bot challenge (e.g. reCAPTCHA) and returned an HTML page instead of a feed."
+                    + hint,
+                    retryable=False,
+                )
+            raise _BadFeedResponse(
+                f"returned a malformed/empty response: {parsed.get('bozo_exception', 'unknown error')}"
+            )
+        return parsed
+
+    parsed = _fetch_with_retries(name, url, _parse)
+    if parsed is None:
+        return []
 
     articles = []
     for entry in parsed.entries:
@@ -399,11 +578,11 @@ def fetch_feed(feed_config: dict) -> list[dict]:
     return articles
 
 
-def fetch_all_feeds(feeds_config: list[dict]) -> list[dict]:
+def fetch_all_feeds(feeds_config: list[dict], pubmed_config: dict | None = None) -> list[dict]:
     """Fetch all feeds and return a flat list of article dicts."""
     all_articles = []
     for feed_config in feeds_config:
-        all_articles.extend(fetch_feed(feed_config))
+        all_articles.extend(fetch_feed(feed_config, pubmed_config))
     return all_articles
 
 
@@ -1150,7 +1329,7 @@ def main() -> None:
 
         # Fetch
         feeds_config = config.get("feeds", [])
-        articles = fetch_all_feeds(feeds_config)
+        articles = fetch_all_feeds(feeds_config, config.get("pubmed") or {})
         logger.info("Total articles fetched across all feeds: %d", len(articles))
 
         if args.skip_backlog:
