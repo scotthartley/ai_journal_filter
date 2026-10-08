@@ -350,7 +350,7 @@ def _fetch_with_retries(name: str, url: str, fetch):
     return None
 
 
-_PUBMED_JOURNAL_RSS_RE = re.compile(r"^https?://pubmed\.ncbi\.nlm\.nih\.gov/rss/journals/(\d+)/?")
+_PUBMED_JOURNAL_RSS_RE = re.compile(r"^https?://pubmed\.ncbi\.nlm\.nih\.gov/rss/journals/([0-9A-Za-z]+)/?")
 _PUBMED_SEARCH_RSS_RE = re.compile(r"^https?://pubmed\.ncbi\.nlm\.nih\.gov/rss/search/")
 
 
